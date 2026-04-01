@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.db import AsyncSessionLocal, engine
 from app.models import User
+from app.routes.repos import router as repos_router
 from app.routes.users import router as users_router
 
 
@@ -37,6 +38,9 @@ app.add_middleware(
 )
 
 app.include_router(users_router)
+
+
+app.include_router(repos_router)
 
 
 @app.get("/health")
