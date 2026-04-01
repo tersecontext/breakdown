@@ -19,21 +19,20 @@ async function tryRefresh(): Promise<string | null> {
     return new Promise((resolve) => refreshQueue.push(resolve));
   }
   isRefreshing = true;
+  let newToken: string | null = null;
   try {
     const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
-    if (!res.ok) {
-      refreshQueue.forEach(cb => cb(null));
-      refreshQueue = [];
-      return null;
+    if (res.ok) {
+      const data: RefreshResponse = await res.json();
+      accessToken = data.access_token;
+      newToken = data.access_token;
     }
-    const data: RefreshResponse = await res.json();
-    accessToken = data.access_token;
-    refreshQueue.forEach(cb => cb(data.access_token));
-    refreshQueue = [];
-    return data.access_token;
   } finally {
     isRefreshing = false;
+    refreshQueue.forEach(cb => cb(newToken));
+    refreshQueue = [];
   }
+  return newToken;
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
