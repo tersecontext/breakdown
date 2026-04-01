@@ -1,4 +1,3 @@
-import hashlib
 import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 
@@ -83,7 +82,7 @@ async def login(
     result = await db.execute(select(User).where(User.username == body.username))
     user = result.scalar_one_or_none()
     if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if user.password_hash is None:
         # First login — set the password

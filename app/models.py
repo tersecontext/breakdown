@@ -26,6 +26,7 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     submitted_tasks: Mapped[list[Task]] = relationship(
         "Task", foreign_keys="Task.submitter_id", back_populates="submitter"
