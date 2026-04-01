@@ -101,3 +101,11 @@ export interface TaskCreate {
   additional_context: string[];
   optional_answers: Record<string, unknown>;
 }
+
+export interface TaskResubmit {
+  feature_name?: string;
+  description?: string;
+  repo?: string;
+  branch_from?: string;
+  additional_context?: string[];
+}

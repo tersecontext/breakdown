@@ -1,4 +1,4 @@
-import type { RepoInfo, RefreshResponse, TaskCreate, TaskListItem, TaskOut, TokenResponse, User } from './types';
+import type { RepoInfo, RefreshResponse, TaskCreate, TaskListItem, TaskOut, TaskResubmit, TokenResponse, User } from './types';
 
 // In-memory only — never written to localStorage
 let accessToken: string | null = null;
@@ -111,4 +111,10 @@ export const rejectTask = (id: string, reason?: string): Promise<TaskOut> =>
   apiFetch(`/api/tasks/${id}/reject`, {
     method: 'POST',
     body: JSON.stringify({ reason: reason ?? null }),
+  });
+
+export const resubmitTask = (id: string, fields: TaskResubmit): Promise<TaskOut> =>
+  apiFetch(`/api/tasks/${id}/resubmit`, {
+    method: 'POST',
+    body: JSON.stringify(fields),
   });

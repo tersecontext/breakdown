@@ -18,6 +18,7 @@ export default function Login() {
       const data = await login(username.trim(), password)
       setAccessToken(data.access_token)
       localStorage.setItem('role', data.user.role)
+      localStorage.setItem('user_id', data.user.id)
       navigate('/tasks')
     } catch (err) {
       setError(String(err))
