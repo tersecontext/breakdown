@@ -102,15 +102,9 @@ async def test_me_expired_token_returns_401(app_client, db_session):
 # ---------------------------------------------------------------------------
 
 async def test_admin_endpoint_accessible_by_admin(app_client, db_session):
-    from app.auth import require_admin
-    from app.main import app as fastapi_app
     admin = await make_user(db_session, "admin2", role="admin")
-    fastapi_app.dependency_overrides[require_admin] = lambda: admin
-    try:
-        r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(admin)}"})
-        assert r.status_code == 200
-    finally:
-        fastapi_app.dependency_overrides.pop(require_admin, None)
+    r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(admin)}"})
+    assert r.status_code == 200
 
 
 async def test_admin_endpoint_rejected_for_member(app_client, db_session):
