@@ -128,6 +128,34 @@ async def test_get_tasks_returns_list():
 
 
 @pytest.mark.asyncio
+async def test_get_tasks_filters_by_state_and_repo():
+    """GET /api/tasks?state=researched&repo=tersecontext returns only matching tasks"""
+    task = make_task(state="researched")
+    session = AsyncMock()
+    result = MagicMock()
+    result.all.return_value = [(task, "kmcbeth")]
+    session.execute.return_value = result
+    setup_auth(member)
+
+    async def override():
+        yield session
+    app.dependency_overrides[get_session] = override
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/tasks",
+            params={"state": "researched", "repo": "tersecontext"},
+            headers={"X-User": "kmcbeth"},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert data[0]["state"] == "researched"
+    assert data[0]["repo"] == "tersecontext"
+
+
+@pytest.mark.asyncio
 async def test_get_task_by_id_returns_full_task():
     """GET /api/tasks/{id} returns full TaskOut"""
     task = make_task()
