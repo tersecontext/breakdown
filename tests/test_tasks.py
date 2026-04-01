@@ -254,10 +254,8 @@ async def test_resubmit_task_returns_404_when_not_found(app_client, db_session):
 
 @pytest.mark.asyncio
 async def test_resubmit_task_returns_409_when_not_rejected(app_client, db_session):
-    from app.main import app as fastapi_app
     user = await make_user(db_session, "resubmit4")
     task = await make_task(db_session, user, state="researched")
-    fastapi_app.state.background_tasks = set()
     response = await app_client.post(
         f"/api/tasks/{task.id}/resubmit",
         json={},
