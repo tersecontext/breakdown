@@ -89,7 +89,7 @@ async def test_post_tasks_creates_task_and_returns_201():
     app.state.llm_client = AsyncMock()
     app.state.background_tasks = set()
 
-    with patch("app.routes.tasks.asyncio.create_task"):
+    with patch("app.routes.tasks.asyncio.create_task") as mock_create_task:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(
                 "/api/tasks",
@@ -101,6 +101,7 @@ async def test_post_tasks_creates_task_and_returns_201():
     data = response.json()
     assert data["feature_name"] == "ts-parser"
     assert data["state"] == "submitted"
+    mock_create_task.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -251,3 +252,44 @@ async def test_reject_task_returns_409_when_not_researched():
         )
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_approve_task_returns_404_when_not_found():
+    """POST /api/tasks/{id}/approve returns 404 when task does not exist"""
+    session = make_mock_session(None)
+    setup_auth(admin_user)
+    setup_session(session)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/api/tasks/{uuid.uuid4()}/approve",
+            headers={"X-User": "admin"},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_approve_task_returns_500_when_redis_fails():
+    """POST /api/tasks/{id}/approve returns 500 when Redis publish fails"""
+    task = make_task(state="researched", research={"summary": "test"})
+    task.approved_at = datetime(2026, 3, 31, tzinfo=timezone.utc)
+    session = make_mock_session(task)
+    setup_auth(admin_user)
+    setup_session(session)
+
+    app.state.redis = AsyncMock()
+    app.state.tc_client = AsyncMock()
+    app.state.llm_client = AsyncMock()
+    app.state.background_tasks = set()
+
+    with patch("app.routes.tasks.publish_approved_task", new_callable=AsyncMock) as mock_publish:
+        mock_publish.side_effect = Exception("Redis connection refused")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/tasks/{TASK_ID}/approve",
+                headers={"X-User": "admin"},
+            )
+
+    assert response.status_code == 500

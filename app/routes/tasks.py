@@ -41,7 +41,9 @@ async def create_task(
     await session.commit()
 
     result = await session.execute(
-        select(Task).where(Task.id == task.id).options(selectinload(Task.logs))
+        select(Task).where(Task.id == task.id).options(
+            selectinload(Task.logs), selectinload(Task.submitter)
+        )
     )
     task = result.scalar_one()
 
@@ -118,23 +120,28 @@ async def approve_task(
     if task.state != "researched":
         raise HTTPException(status_code=409, detail=f"Task is in state '{task.state}', expected 'researched'")
 
+    # Set state + log (but don't commit yet)
     task.state = "approved"
     task.approved_by_id = user.id
     task.approved_at = datetime.now(timezone.utc)
     session.add(TaskLog(task_id=task.id, event="task_approved", actor_id=user.id))
-    await session.commit()
 
+    # Publish FIRST — if it fails, nothing was committed
     try:
         await publish_approved_task(task, user, request.app.state.redis)
     except Exception as e:
         logger.error("Redis publish failed for task %s: %s", task_id, e)
         raise HTTPException(status_code=500, detail="Redis publish failed")
 
+    # Commit state + both logs together only after successful publish
     session.add(TaskLog(task_id=task.id, event="task_queued", actor_id=user.id))
     await session.commit()
 
+    # Re-fetch for clean response
     result = await session.execute(
-        select(Task).where(Task.id == task_id).options(selectinload(Task.logs))
+        select(Task).where(Task.id == task_id).options(
+            selectinload(Task.submitter), selectinload(Task.logs)
+        )
     )
     return result.scalar_one()
 
