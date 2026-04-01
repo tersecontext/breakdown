@@ -20,6 +20,13 @@ from app.routes.users import router as users_router
 logger = logging.getLogger(__name__)
 
 
+async def run_migrations() -> None:
+    proc = await asyncio.create_subprocess_exec("alembic", "upgrade", "head")
+    await proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"alembic upgrade head failed with code {proc.returncode}")
+
+
 async def seed_admin() -> None:
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(User))
@@ -31,6 +38,7 @@ async def seed_admin() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await run_migrations()
     await seed_admin()
     app.state.tc_client = TerseContextClient(settings.tersecontext_url)
     app.state.llm_client = AnthropicClient(settings.anthropic_api_key, settings.default_model)
