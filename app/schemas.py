@@ -96,6 +96,14 @@ class TaskReject(BaseModel):
     reason: str | None = None
 
 
+class TaskResubmit(BaseModel):
+    feature_name: str | None = None
+    description: str | None = None
+    repo: str | None = None
+    branch_from: str | None = None
+    additional_context: list[str] | None = None
+
+
 class TaskOut(BaseModel):
     id: uuid.UUID
     feature_name: str
