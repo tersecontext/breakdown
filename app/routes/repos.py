@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/repos")
 
 def _find_repos() -> list[dict]:
     repos = []
-    for source_dir in settings.source_dirs.split(","):
+    for source_dir in settings.repos_dir.split(","):
         source_dir = source_dir.strip()
         if not os.path.isdir(source_dir):
             continue

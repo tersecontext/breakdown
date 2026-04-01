@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     tersecontext_url: str = "http://localhost:8090"
     repo_watcher_url: str = "http://localhost:8091"
-    source_dirs: str
+    repos_dir: str
     anthropic_api_key: str = ""
     slack_bot_token: str = ""
     slack_app_token: str = ""
