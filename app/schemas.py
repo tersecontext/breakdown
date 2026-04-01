@@ -59,6 +59,28 @@ class ResearchOutput(BaseModel):
     metrics: ResearchMetrics
 
 
+class TaskLogOut(BaseModel):
+    id: int
+    event: str
+    actor_id: uuid.UUID | None
+    detail: dict[str, Any] | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TaskListItem(BaseModel):
+    id: uuid.UUID
+    feature_name: str
+    repo: str
+    state: str
+    submitter_id: uuid.UUID
+    submitter_username: str
+    created_at: datetime
+
+    model_config = {"from_attributes": False}
+
+
 # --- Task schemas ---
 
 class TaskCreate(BaseModel):
@@ -71,7 +93,7 @@ class TaskCreate(BaseModel):
 
 
 class TaskReject(BaseModel):
-    reason: str
+    reason: str | None = None
 
 
 class TaskOut(BaseModel):
@@ -83,6 +105,7 @@ class TaskOut(BaseModel):
     state: str
     submitter_id: uuid.UUID
     approved_by_id: uuid.UUID | None
+    approved_at: datetime | None
     source_channel: str | None
     slack_channel_id: str | None
     slack_thread_ts: str | None
@@ -93,6 +116,7 @@ class TaskOut(BaseModel):
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    logs: list[TaskLogOut] = []
 
     model_config = {"from_attributes": True}
 
