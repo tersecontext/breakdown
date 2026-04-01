@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { approveTask, rejectTask, retryTask, getTask } from '../api'
+import { approveTask, rejectTask, resubmitTask, retryTask, getTask } from '../api'
 import Nav from '../components/Nav'
 import ResearchView from '../components/ResearchView'
 import StateBadge from '../components/StateBadge'
@@ -13,8 +13,14 @@ export default function TaskDetail() {
   const [rejecting, setRejecting] = useState(false)
   const [rejectReason, setRejectReason] = useState('')
   const [acting, setActing] = useState(false)
+  const [resubmitting, setResubmitting] = useState(false)
+  const [resubmitFields, setResubmitFields] = useState<{
+    feature_name: string; description: string; repo: string;
+    branch_from: string; additional_context: string;
+  } | null>(null)
   const role = localStorage.getItem('role') ?? 'member'
   const isAdmin = role === 'admin'
+  const currentUserId = localStorage.getItem('user_id')
 
   const load = useCallback(() => {
     if (!id) return
@@ -85,6 +91,7 @@ export default function TaskDetail() {
             const STEP_LABELS: Record<string, string> = {
               task_created: 'Queued…',
               task_retried: 'Queued…',
+              task_resubmitted: 'Queued…',
               research_started: 'Starting research…',
               querying_codebase: 'Querying codebase…',
               analyzing: 'Analyzing with Claude…',
@@ -138,11 +145,116 @@ export default function TaskDetail() {
                 </div>
               )}
               {task.state === 'rejected' && (
-                <div style={{
-                  display: 'inline-block', marginBottom: 16, padding: '4px 12px', borderRadius: 4,
-                  background: '#fee2e2', color: '#dc2626', fontSize: 13, fontWeight: 600,
-                }}>
-                  ✗ Rejected
+                <div>
+                  <div style={{
+                    display: 'inline-block', marginBottom: 16, padding: '4px 12px', borderRadius: 4,
+                    background: '#fee2e2', color: '#dc2626', fontSize: 13, fontWeight: 600,
+                  }}>
+                    ✗ Rejected
+                  </div>
+                  {(isAdmin || currentUserId === task.submitter_id) && (
+                    resubmitting ? (
+                      <div style={{ marginTop: 16 }}>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <input
+                            value={resubmitFields?.feature_name ?? ''}
+                            onChange={e => setResubmitFields(f => f ? { ...f, feature_name: e.target.value } : f)}
+                            placeholder="Feature name"
+                            style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14 }}
+                          />
+                          <textarea
+                            value={resubmitFields?.description ?? ''}
+                            onChange={e => setResubmitFields(f => f ? { ...f, description: e.target.value } : f)}
+                            placeholder="Description"
+                            rows={3}
+                            style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14 }}
+                          />
+                          <input
+                            value={resubmitFields?.repo ?? ''}
+                            onChange={e => setResubmitFields(f => f ? { ...f, repo: e.target.value } : f)}
+                            placeholder="Repo"
+                            style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14 }}
+                          />
+                          <input
+                            value={resubmitFields?.branch_from ?? ''}
+                            onChange={e => setResubmitFields(f => f ? { ...f, branch_from: e.target.value } : f)}
+                            placeholder="Branch"
+                            style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14 }}
+                          />
+                          <textarea
+                            value={resubmitFields?.additional_context ?? ''}
+                            onChange={e => setResubmitFields(f => f ? { ...f, additional_context: e.target.value } : f)}
+                            placeholder="Additional context (one item per line)"
+                            rows={3}
+                            style={{ padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14 }}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                          <button
+                            onClick={async () => {
+                              if (!id || !resubmitFields) return
+                              setActing(true)
+                              try {
+                                const fields = {
+                                  feature_name: resubmitFields.feature_name || undefined,
+                                  description: resubmitFields.description || undefined,
+                                  repo: resubmitFields.repo || undefined,
+                                  branch_from: resubmitFields.branch_from || undefined,
+                                  additional_context: resubmitFields.additional_context
+                                    ? resubmitFields.additional_context.split('\n').map(s => s.trim()).filter(Boolean)
+                                    : undefined,
+                                }
+                                setTask(await resubmitTask(id, fields))
+                                setResubmitting(false)
+                                setResubmitFields(null)
+                              } catch (e) {
+                                setError(String(e))
+                              } finally {
+                                setActing(false)
+                              }
+                            }}
+                            disabled={acting}
+                            style={{
+                              padding: '8px 20px', borderRadius: 4, background: '#111', color: '#fff',
+                              border: 'none', fontSize: 14, fontWeight: 500, opacity: acting ? 0.5 : 1,
+                            }}
+                          >
+                            {acting ? 'Resubmitting…' : 'Resubmit'}
+                          </button>
+                          <button
+                            onClick={() => { setResubmitting(false); setResubmitFields(null) }}
+                            style={{
+                              padding: '8px 16px', borderRadius: 4, background: '#f3f4f6',
+                              color: '#111', border: '1px solid #d1d5db', fontSize: 14,
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 8 }}>
+                        <button
+                          onClick={() => {
+                            setResubmitting(true)
+                            setResubmitFields({
+                              feature_name: task.feature_name,
+                              description: task.description,
+                              repo: task.repo,
+                              branch_from: task.branch_from,
+                              additional_context: task.additional_context.join('\n'),
+                            })
+                          }}
+                          style={{
+                            padding: '8px 20px', borderRadius: 4, background: '#fff', color: '#111',
+                            border: '1px solid #d1d5db', fontSize: 14, fontWeight: 500,
+                          }}
+                        >
+                          Edit &amp; Resubmit
+                        </button>
+                      </div>
+                    )
+                  )}
                 </div>
               )}
               <ResearchView research={task.research} />
