@@ -8,6 +8,7 @@ from sqlalchemy import select
 from app.db import AsyncSessionLocal, engine
 from app.models import User
 from app.routes.repos import router as repos_router
+from app.routes.tasks import router as tasks_router
 from app.routes.users import router as users_router
 
 
@@ -41,6 +42,9 @@ app.include_router(users_router)
 
 
 app.include_router(repos_router)
+
+
+app.include_router(tasks_router)
 
 
 @app.get("/health")
