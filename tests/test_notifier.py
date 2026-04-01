@@ -105,3 +105,25 @@ async def test_post_error_posts_error_to_thread():
     assert kwargs["channel"] == "C123"
     assert kwargs["thread_ts"] == "111.222"
     assert "oops" in str(kwargs.get("text", "")) or "oops" in str(kwargs.get("blocks", ""))
+
+
+@pytest.mark.asyncio
+async def test_post_research_result_handles_slack_exception():
+    """Does not raise when Slack API call throws"""
+    from app.engine.notifier import post_research_result
+    task = make_task()
+    client = AsyncMock()
+    client.chat_postMessage.side_effect = Exception("Slack API down")
+    # Should not raise
+    await post_research_result(task, client, is_admin=False)
+
+
+@pytest.mark.asyncio
+async def test_post_research_result_handles_none_research():
+    """Does not raise when task.research is None"""
+    from app.engine.notifier import post_research_result
+    task = make_task()
+    task.research = None
+    client = AsyncMock()
+    await post_research_result(task, client, is_admin=False)
+    client.chat_postMessage.assert_called_once()
