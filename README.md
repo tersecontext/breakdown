@@ -78,9 +78,10 @@ Open **http://localhost:5173** and log in with username `admin`.
 
 ### Required
 
-| Variable | Description |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Claude API key (sk-ant-...) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | (required) | Claude API key (sk-ant-...) |
+| `SECRET_KEY` | (required) | Secret for signing JWTs — min 32 chars |
 
 ### Database
 
@@ -102,6 +103,14 @@ Open **http://localhost:5173** and log in with username `admin`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Claude model ID |
+
+### Auth
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACCESS_TOKEN_TTL` | `900` | Access token lifetime in seconds (15 min) |
+| `REFRESH_TOKEN_TTL` | `604800` | Refresh token lifetime in seconds (7 days) |
+| `CORS_ORIGINS` | `[]` | Allowed CORS origins e.g. `["http://localhost:5173"]` |
 
 ### Slack (Optional)
 
@@ -259,6 +268,16 @@ All endpoints require the `X-User: <username>` header. Admin-only endpoints addi
 
 ---
 
+## Authentication
+
+Breakdown uses username + password login. On first login, any password is accepted and stored (for existing users created before this feature). Subsequent logins require the stored password.
+
+Login returns a short-lived JWT access token (15 min) and sets an HttpOnly refresh token cookie (7 days). The frontend stores the access token in memory and refreshes automatically.
+
+To change a password after login, `POST /api/auth/set-password` with `{"new_password": "..."}` and a valid Bearer token.
+
+---
+
 ## Redis Stream
 
 Approved tasks are published to `stream:breakdown-approved`. Each entry contains the full approval bundle.
@@ -349,6 +368,13 @@ npm run dev
 ```
 
 **Running Tests:**
+
+**Before running tests**, migrate the test database:
+```bash
+DATABASE_URL=postgresql+asyncpg://tersecontext:localpassword@172.26.0.7/breakdown_test \
+  alembic upgrade head
+```
+
 ```bash
 # Requires a running test database
 pytest
