@@ -126,6 +126,9 @@ async def retry_task(
     session.add(TaskLog(task_id=task.id, event="task_retried", actor_id=user.id))
     await session.commit()
 
+    # Expire the logs relationship so it's re-fetched, since the test fixture has expire_on_commit=False
+    session.expire(task, ["logs"])
+
     result = await session.execute(
         select(Task).where(Task.id == task.id).options(selectinload(Task.logs), selectinload(Task.submitter))
     )
