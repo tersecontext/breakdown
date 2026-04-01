@@ -1,14 +1,27 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
-from app.db import engine
+from app.db import AsyncSessionLocal, engine
+from app.models import User
+from app.routes.users import router as users_router
+
+
+async def seed_admin() -> None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User))
+        if result.first() is None:
+            username = os.getenv("DEFAULT_ADMIN_USERNAME", "admin")
+            session.add(User(username=username, role="admin"))
+            await session.commit()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Engine is created on import; nothing extra needed at startup
+    await seed_admin()
     yield
     await engine.dispose()
 
@@ -22,6 +35,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(users_router)
 
 
 @app.get("/health")
