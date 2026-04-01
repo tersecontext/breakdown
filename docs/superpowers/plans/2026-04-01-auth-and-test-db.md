@@ -1,0 +1,1645 @@
+# Auth Hardening + Test DB Isolation Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Replace the trivially-spoofable `X-User` header auth with bcrypt passwords + JWT access tokens + HttpOnly refresh token cookies, and replace mocked SQLAlchemy sessions in tests with transaction-scoped real DB isolation.
+
+**Architecture:** The backend issues short-lived JWTs (15 min) on login alongside a 7-day refresh token stored as an HttpOnly cookie; `get_current_user` verifies the JWT on every request; the test suite uses a per-test transaction that rolls back on teardown so every test sees a clean DB state without truncation.
+
+**Tech Stack:** Python 3.12, FastAPI, SQLAlchemy 2.0 async, asyncpg, PyJWT>=2.8.0, bcrypt, Alembic, React 19, TypeScript, pytest-asyncio>=0.23
+
+**Spec:** `docs/superpowers/specs/2026-04-01-auth-and-test-db-design.md`
+
+---
+
+## File Map
+
+**New files:**
+- `alembic/versions/<hash>_add_auth_columns.py` — migration: password_hash + sessions table
+- `app/token.py` — JWT encode/decode and refresh token helpers (single responsibility)
+
+**Modified files:**
+- `pyproject.toml` — add bcrypt, PyJWT deps; add asyncio_default_fixture_loop_scope
+- `app/config.py` — SECRET_KEY, TTLs, CORS_ORIGINS
+- `app/models.py` — Session model
+- `app/schemas.py` — LoginRequest (add password), TokenResponse, RefreshResponse, SetPasswordRequest
+- `app/auth.py` — rewrite: JWT Bearer verification instead of X-User header
+- `app/routes/users.py` — rewrite login; add /refresh, /logout, /set-password
+- `app/main.py` — CORS_ORIGINS from settings
+- `frontend/src/types.ts` — TokenResponse type
+- `frontend/src/api.ts` — in-memory token, Bearer header, refresh interceptor
+- `frontend/src/pages/Login.tsx` — add password field
+- `frontend/src/App.tsx` — update RequireAuth guard
+- `tests/conftest.py` — transaction-scoped fixtures; remove AsyncMock patch
+- `tests/test_auth.py` — full rewrite for JWT
+- All other test files — migrate to app_client with real DB rows
+
+---
+
+## Task 1: Add dependencies and pytest config
+
+**Files:**
+- Modify: `pyproject.toml`
+
+- [ ] **Step 1: Add runtime and test dependencies**
+
+Edit `pyproject.toml`. Add to `dependencies`:
+```toml
+"bcrypt>=4.0.0",
+"PyJWT>=2.8.0",
+```
+Add to `[project.optional-dependencies] dev`:
+```toml
+"pytest-asyncio>=0.23.0",
+```
+Add to `[tool.pytest.ini_options]`:
+```toml
+asyncio_default_fixture_loop_scope = "session"
+```
+
+Final `[tool.pytest.ini_options]` section:
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+```
+
+- [ ] **Step 2: Install**
+
+```bash
+pip install -e ".[dev]"
+```
+Expected: installs bcrypt and PyJWT without errors.
+
+- [ ] **Step 3: Verify imports work**
+
+```bash
+python -c "import bcrypt; import jwt; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add pyproject.toml
+git commit -m "chore: add bcrypt, PyJWT deps and session-scoped asyncio fixture config"
+```
+
+---
+
+## Task 2: Database migration
+
+**Files:**
+- Create: `alembic/versions/<generated>_add_auth_columns.py`
+
+- [ ] **Step 1: Generate the migration**
+
+```bash
+alembic revision --autogenerate -m "add auth columns"
+```
+Expected: creates a new file in `alembic/versions/`. Note the generated filename.
+
+- [ ] **Step 2: Inspect and fix the generated migration**
+
+Open the generated file. The `upgrade()` function should contain exactly:
+```python
+def upgrade() -> None:
+    op.add_column('users', sa.Column('password_hash', sa.Text(), nullable=True))
+
+    op.create_table(
+        'sessions',
+        sa.Column('id', sa.UUID(), server_default=sa.text('gen_random_uuid()'), nullable=False),
+        sa.Column('user_id', sa.UUID(), nullable=False),
+        sa.Column('token_hash', sa.Text(), nullable=False),
+        sa.Column('expires_at', sa.DateTime(timezone=True), nullable=False),
+        sa.Column('revoked', sa.Boolean(), server_default='false', nullable=False),
+        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+        sa.ForeignKeyConstraint(['user_id'], ['users.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('token_hash'),
+    )
+    op.create_index('ix_sessions_token_hash', 'sessions', ['token_hash'])
+    op.create_index('ix_sessions_user_id', 'sessions', ['user_id'])
+    op.create_index('ix_sessions_expires_at', 'sessions', ['expires_at'])
+```
+
+The `downgrade()` function:
+```python
+def downgrade() -> None:
+    op.drop_index('ix_sessions_expires_at', table_name='sessions')
+    op.drop_index('ix_sessions_user_id', table_name='sessions')
+    op.drop_index('ix_sessions_token_hash', table_name='sessions')
+    op.drop_table('sessions')
+    op.drop_column('users', 'password_hash')
+```
+
+Replace the autogenerated body with the above if it differs.
+
+- [ ] **Step 3: Apply migration to dev DB**
+
+```bash
+alembic upgrade head
+```
+Expected: `Running upgrade ... -> <revision>, add auth columns`
+
+- [ ] **Step 4: Apply migration to test DB**
+
+```bash
+DATABASE_URL=postgresql+asyncpg://tersecontext:localpassword@172.26.0.7/breakdown_test alembic upgrade head
+```
+Expected: same output for the test DB.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add alembic/versions/
+git commit -m "feat: migration — add password_hash to users and sessions table"
+```
+
+---
+
+## Task 3: Settings
+
+**Files:**
+- Modify: `app/config.py`
+
+- [ ] **Step 1: Add new settings**
+
+Replace the contents of `app/config.py`:
+```python
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    database_url: str
+    redis_url: str = "redis://localhost:6379"
+    tersecontext_url: str = "http://localhost:8090"
+    source_dirs: str
+    anthropic_api_key: str
+    slack_bot_token: str = ""
+    slack_app_token: str = ""
+    slack_channel: str = "tc-tasks"
+    default_model: str = "claude-sonnet-4-20250514"
+    port: int = 8000
+
+    # Auth
+    secret_key: str
+    access_token_ttl: int = 900      # 15 minutes
+    refresh_token_ttl: int = 604800  # 7 days
+    cors_origins: list[str] = []
+
+    @field_validator("secret_key")
+    @classmethod
+    def secret_key_min_length(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError("SECRET_KEY must be at least 32 characters")
+        return v
+
+
+settings = Settings()
+```
+
+- [ ] **Step 2: Add SECRET_KEY to .env.example**
+
+Open `.env.example` and add (generate a real value for local dev):
+```
+SECRET_KEY=change-me-to-a-random-32-char-string
+CORS_ORIGINS=["http://localhost:5173"]
+```
+
+- [ ] **Step 3: Add SECRET_KEY to your local .env**
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+Copy the output. Add to `.env`:
+```
+SECRET_KEY=<output>
+CORS_ORIGINS=["http://localhost:5173"]
+```
+
+- [ ] **Step 4: Verify app still imports**
+
+```bash
+python -c "from app.config import settings; print(settings.access_token_ttl)"
+```
+Expected: `900`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add app/config.py .env.example
+git commit -m "feat: add SECRET_KEY, token TTL, and CORS_ORIGINS settings"
+```
+
+---
+
+## Task 4: Session model
+
+**Files:**
+- Modify: `app/models.py`
+
+- [ ] **Step 1: Add the Session model**
+
+Add after the `TaskLog` class in `app/models.py`:
+```python
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False
+    )
+    revoked: Mapped[bool] = mapped_column(nullable=False, server_default="false", default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped[User] = relationship("User")
+```
+
+- [ ] **Step 2: Verify the model imports cleanly**
+
+```bash
+python -c "from app.models import Session; print(Session.__tablename__)"
+```
+Expected: `sessions`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/models.py
+git commit -m "feat: add Session ORM model"
+```
+
+---
+
+## Task 5: Schemas
+
+**Files:**
+- Modify: `app/schemas.py`
+
+- [ ] **Step 1: Update auth schemas**
+
+In `app/schemas.py`, replace the existing `# --- Auth schemas ---` section at the bottom:
+```python
+# --- Auth schemas ---
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str = Field(..., min_length=1)
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class SetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=1)
+```
+
+Add `from pydantic import Field` to the imports at the top.
+
+- [ ] **Step 2: Verify**
+
+```bash
+python -c "from app.schemas import LoginRequest, TokenResponse, RefreshResponse, SetPasswordRequest; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/schemas.py
+git commit -m "feat: update auth schemas — add password field, TokenResponse, RefreshResponse"
+```
+
+---
+
+## Task 6: JWT and token helpers
+
+**Files:**
+- Create: `app/token.py`
+
+- [ ] **Step 1: Write the token module**
+
+Create `app/token.py`:
+```python
+import hashlib
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import jwt
+
+from app.config import settings
+
+ALGORITHM = "HS256"
+
+
+def create_access_token(user_id: uuid.UUID, session_id: uuid.UUID, role: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "jti": str(session_id),
+        "role": role,
+        "exp": now + timedelta(seconds=settings.access_token_ttl),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> dict:
+    """Decode and verify a JWT. Raises jwt.PyJWTError subclasses on failure."""
+    return jwt.decode(
+        token,
+        settings.secret_key,
+        algorithms=[ALGORITHM],
+        options={"require": ["exp", "sub", "jti"]},
+    )
+
+
+def generate_refresh_token() -> tuple[str, str]:
+    """Return (raw_token, sha256_hex_hash). Store only the hash."""
+    raw = secrets.token_hex(32)
+    hashed = hashlib.sha256(raw.encode()).hexdigest()
+    return raw, hashed
+
+
+def hash_refresh_token(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+```
+
+- [ ] **Step 2: Write failing tests**
+
+Create `tests/test_token.py`:
+```python
+import time
+import pytest
+import jwt as pyjwt
+import uuid
+
+from app.token import create_access_token, decode_access_token, generate_refresh_token, hash_refresh_token
+
+
+def test_create_and_decode_roundtrip():
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    token = create_access_token(user_id, session_id, "admin")
+    payload = decode_access_token(token)
+    assert payload["sub"] == str(user_id)
+    assert payload["jti"] == str(session_id)
+    assert payload["role"] == "admin"
+
+
+def test_expired_token_raises():
+    import app.token as token_module
+    original_ttl = token_module.settings.access_token_ttl
+    token_module.settings.access_token_ttl = -1  # already expired
+    token = create_access_token(uuid.uuid4(), uuid.uuid4(), "member")
+    token_module.settings.access_token_ttl = original_ttl
+    with pytest.raises(pyjwt.ExpiredSignatureError):
+        decode_access_token(token)
+
+
+def test_tampered_token_raises():
+    token = create_access_token(uuid.uuid4(), uuid.uuid4(), "member")
+    tampered = token[:-4] + "xxxx"
+    with pytest.raises(pyjwt.PyJWTError):
+        decode_access_token(tampered)
+
+
+def test_generate_refresh_token_returns_pair():
+    raw, hashed = generate_refresh_token()
+    assert len(raw) == 64  # hex(32 bytes)
+    assert hashed == hash_refresh_token(raw)
+
+
+def test_hash_refresh_token_is_deterministic():
+    raw, h1 = generate_refresh_token()
+    h2 = hash_refresh_token(raw)
+    assert h1 == h2
+```
+
+- [ ] **Step 3: Run — expect pass (no DB needed)**
+
+```bash
+pytest tests/test_token.py -v
+```
+Expected: all 5 tests PASS.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add app/token.py tests/test_token.py
+git commit -m "feat: add JWT and refresh token helpers with tests"
+```
+
+---
+
+## Task 7: Rewrite auth.py
+
+**Files:**
+- Modify: `app/auth.py`
+
+- [ ] **Step 1: Rewrite auth.py**
+
+Replace the entire contents of `app/auth.py`:
+```python
+import uuid
+
+import jwt as pyjwt
+from fastapi import Depends, Header, HTTPException
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_session
+from app.models import User
+from app.token import decode_access_token
+
+
+async def get_current_user(
+    authorization: str = Header(..., alias="Authorization"),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    token = authorization[7:]
+    try:
+        payload = decode_access_token(token)
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except pyjwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    try:
+        user_id = uuid.UUID(payload["sub"])
+    except (ValueError, KeyError):
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin required")
+    return user
+```
+
+- [ ] **Step 2: Verify import**
+
+```bash
+python -c "from app.auth import get_current_user, require_admin; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/auth.py
+git commit -m "feat: rewrite auth.py — JWT Bearer verification replaces X-User header"
+```
+
+---
+
+## Task 8: Rewrite users route
+
+**Files:**
+- Modify: `app/routes/users.py`
+
+This is the largest single change. The login endpoint gains bcrypt verification and cookie setting; three new endpoints are added.
+
+- [ ] **Step 1: Rewrite app/routes/users.py**
+
+Replace the entire file:
+```python
+import hashlib
+import uuid as _uuid
+from datetime import datetime, timedelta, timezone
+
+import bcrypt
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth import get_current_user, require_admin
+from app.db import get_session
+from app.models import Session, User
+from app.schemas import (
+    LoginRequest,
+    RefreshResponse,
+    SetPasswordRequest,
+    TokenResponse,
+    UserCreate,
+    UserOut,
+    UserUpdate,
+)
+from app.token import (
+    create_access_token,
+    decode_access_token,
+    generate_refresh_token,
+    hash_refresh_token,
+)
+from app.config import settings
+
+router = APIRouter()
+
+
+def _set_refresh_cookie(response: Response, raw_token: str) -> None:
+    response.set_cookie(
+        key="refresh_token",
+        value=raw_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=settings.refresh_token_ttl,
+        path="/api/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie("refresh_token", path="/api/auth")
+
+
+async def _create_session(
+    user: User, db: AsyncSession
+) -> tuple[str, str]:
+    """Create a DB session row, clean up expired sessions. Returns (access_token, raw_refresh_token)."""
+    raw_refresh, refresh_hash = generate_refresh_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=settings.refresh_token_ttl)
+
+    new_session = Session(
+        user_id=user.id,
+        token_hash=refresh_hash,
+        expires_at=expires_at,
+    )
+    db.add(new_session)
+    await db.flush()  # get session.id before creating access token
+
+    access_token = create_access_token(user.id, new_session.id, user.role)
+
+    # Clean up expired sessions for this user opportunistically
+    await db.execute(
+        Session.__table__.delete().where(
+            Session.user_id == user.id,
+            Session.expires_at < datetime.now(timezone.utc),
+            Session.id != new_session.id,
+        )
+    )
+    return access_token, raw_refresh
+
+
+@router.post("/api/auth/login", response_model=TokenResponse)
+async def login(
+    body: LoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_session),
+):
+    result = await db.execute(select(User).where(User.username == body.username))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.password_hash is None:
+        # First login — set the password
+        user.password_hash = bcrypt.hashpw(
+            body.password.encode(), bcrypt.gensalt()
+        ).decode()
+        db.add(user)
+    else:
+        if not bcrypt.checkpw(body.password.encode(), user.password_hash.encode()):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+    access_token, raw_refresh = await _create_session(user, db)
+    await db.flush()
+    _set_refresh_cookie(response, raw_refresh)
+
+    return TokenResponse(
+        access_token=access_token,
+        user=UserOut.model_validate(user),
+    )
+
+
+@router.post("/api/auth/refresh", response_model=RefreshResponse)
+async def refresh(
+    response: Response,
+    db: AsyncSession = Depends(get_session),
+    refresh_token: str | None = Cookie(default=None),
+):
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="No refresh token")
+
+    token_hash = hash_refresh_token(refresh_token)
+    result = await db.execute(
+        select(Session).where(Session.token_hash == token_hash)
+    )
+    session_row = result.scalar_one_or_none()
+
+    if session_row is None or session_row.revoked:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    if session_row.expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    # Rotate: revoke old, create new — all in the same flush
+    session_row.revoked = True
+    db.add(session_row)
+
+    user_result = await db.execute(select(User).where(User.id == session_row.user_id))
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    access_token, raw_refresh = await _create_session(user, db)
+    await db.flush()
+    _set_refresh_cookie(response, raw_refresh)
+
+    return RefreshResponse(access_token=access_token)
+
+
+@router.post("/api/auth/logout", status_code=204)
+async def logout(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(get_current_user),
+):
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:]  # already validated by get_current_user
+    payload = decode_access_token(token)
+    jti = payload["jti"]
+
+    await db.execute(
+        update(Session)
+        .where(Session.id == _uuid.UUID(jti))
+        .values(revoked=True)
+    )
+    await db.flush()
+    _clear_refresh_cookie(response)
+
+
+@router.post("/api/auth/set-password", response_model=TokenResponse)
+async def set_password(
+    body: SetPasswordRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
+):
+    user.password_hash = bcrypt.hashpw(
+        body.new_password.encode(), bcrypt.gensalt()
+    ).decode()
+    db.add(user)
+
+    # Revoke all existing sessions for this user
+    await db.execute(
+        update(Session).where(Session.user_id == user.id).values(revoked=True)
+    )
+    await db.flush()
+
+    # Issue new session
+    access_token, raw_refresh = await _create_session(user, db)
+    await db.flush()
+    _set_refresh_cookie(response, raw_refresh)
+
+    return TokenResponse(
+        access_token=access_token,
+        user=UserOut.model_validate(user),
+    )
+
+
+@router.get("/api/auth/me", response_model=UserOut)
+async def me(user: User = Depends(get_current_user)):
+    return user
+
+
+@router.post("/api/users", response_model=UserOut)
+async def create_user(
+    body: UserCreate,
+    db: AsyncSession = Depends(get_session),
+    _admin: User = Depends(require_admin),
+):
+    result = await db.execute(select(User).where(User.username == body.username))
+    if result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = User(username=body.username, role=body.role)
+    db.add(user)
+    await db.flush()
+    await db.refresh(user)
+    return user
+
+
+@router.get("/api/users", response_model=list[UserOut])
+async def list_users(
+    db: AsyncSession = Depends(get_session),
+    _admin: User = Depends(require_admin),
+):
+    result = await db.execute(select(User))
+    return result.scalars().all()
+
+
+@router.patch("/api/users/{user_id}", response_model=UserOut)
+async def update_user(
+    user_id: str,
+    body: UserUpdate,
+    db: AsyncSession = Depends(get_session),
+    _admin: User = Depends(require_admin),
+):
+    try:
+        uid = _uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid user id")
+    result = await db.execute(select(User).where(User.id == uid))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.role = body.role
+    await db.flush()
+    await db.refresh(user)
+    return user
+```
+
+- [ ] **Step 2: Verify import**
+
+```bash
+python -c "from app.routes.users import router; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/routes/users.py
+git commit -m "feat: rewrite users route — bcrypt login, JWT, refresh, logout, set-password"
+```
+
+---
+
+## Task 9: CORS update in main.py
+
+**Files:**
+- Modify: `app/main.py`
+
+- [ ] **Step 1: Replace wildcard CORS with settings-driven origins**
+
+In `app/main.py`, find:
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+Replace with:
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+- [ ] **Step 2: Verify app starts**
+
+```bash
+python -c "from app.main import app; print('ok')"
+```
+Expected: `ok`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add app/main.py
+git commit -m "fix: replace wildcard CORS with CORS_ORIGINS setting"
+```
+
+---
+
+## Task 10: Frontend — api.ts
+
+**Files:**
+- Modify: `frontend/src/api.ts`
+- Modify: `frontend/src/types.ts`
+
+- [ ] **Step 1: Add TokenResponse to types.ts**
+
+In `frontend/src/types.ts`, add after the `User` interface:
+```typescript
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+export interface RefreshResponse {
+  access_token: string;
+  token_type: string;
+}
+```
+
+- [ ] **Step 2: Rewrite api.ts**
+
+Replace the entire contents of `frontend/src/api.ts`:
+```typescript
+import type { RepoInfo, RefreshResponse, TaskCreate, TaskListItem, TaskOut, TokenResponse, User } from './types';
+
+// In-memory only — never written to localStorage
+let accessToken: string | null = null;
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token;
+}
+
+export function getAccessToken(): string | null {
+  return accessToken;
+}
+
+let isRefreshing = false;
+let refreshQueue: Array<(token: string | null) => void> = [];
+
+async function tryRefresh(): Promise<string | null> {
+  if (isRefreshing) {
+    return new Promise((resolve) => refreshQueue.push(resolve));
+  }
+  isRefreshing = true;
+  try {
+    const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
+    if (!res.ok) {
+      refreshQueue.forEach(cb => cb(null));
+      refreshQueue = [];
+      return null;
+    }
+    const data: RefreshResponse = await res.json();
+    accessToken = data.access_token;
+    refreshQueue.forEach(cb => cb(data.access_token));
+    refreshQueue = [];
+    return data.access_token;
+  } finally {
+    isRefreshing = false;
+  }
+}
+
+async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const doFetch = (token: string | null) =>
+    fetch(path, {
+      ...options,
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
+
+  let res = await doFetch(accessToken);
+
+  if (res.status === 401 && path !== '/api/auth/refresh') {
+    const newToken = await tryRefresh();
+    if (!newToken) {
+      // Refresh failed — redirect to login
+      accessToken = null;
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+    res = await doFetch(newToken);
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status}: ${text}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const login = (username: string, password: string): Promise<TokenResponse> =>
+  apiFetch('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  });
+
+// Call fetch directly — avoids the apiFetch 401 interceptor redirecting
+// to /login during the RequireAuth page-load session restore attempt.
+export async function refreshSession(): Promise<RefreshResponse> {
+  const res = await fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' });
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+export const logout = (): Promise<void> =>
+  apiFetch('/api/auth/logout', { method: 'POST' });
+
+export const getMe = (): Promise<User> => apiFetch('/api/auth/me');
+
+export const listRepos = (): Promise<RepoInfo[]> => apiFetch('/api/repos');
+
+export const getBranches = (repo: string): Promise<string[]> =>
+  apiFetch(`/api/repos/${encodeURIComponent(repo)}/branches`);
+
+export const listTasks = (): Promise<TaskListItem[]> => apiFetch('/api/tasks');
+
+export const getTask = (id: string): Promise<TaskOut> => apiFetch(`/api/tasks/${id}`);
+
+export const createTask = (body: TaskCreate): Promise<TaskOut> =>
+  apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
+
+export const approveTask = (id: string): Promise<TaskOut> =>
+  apiFetch(`/api/tasks/${id}/approve`, { method: 'POST' });
+
+export const rejectTask = (id: string, reason?: string): Promise<TaskOut> =>
+  apiFetch(`/api/tasks/${id}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add frontend/src/api.ts frontend/src/types.ts
+git commit -m "feat: frontend api — in-memory JWT, Bearer header, refresh interceptor"
+```
+
+---
+
+## Task 11: Frontend — Login.tsx and App.tsx
+
+**Files:**
+- Modify: `frontend/src/pages/Login.tsx`
+- Modify: `frontend/src/App.tsx`
+
+- [ ] **Step 1: Update Login.tsx — add password field**
+
+Replace the contents of `frontend/src/pages/Login.tsx`:
+```tsx
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { login, setAccessToken } from '../api'
+
+export default function Login() {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const navigate = useNavigate()
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!username.trim() || !password) return
+    setLoading(true)
+    setError('')
+    try {
+      const data = await login(username.trim(), password)
+      setAccessToken(data.access_token)
+      localStorage.setItem('role', data.user.role)
+      navigate('/tasks')
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'center', alignItems: 'center',
+      minHeight: '100vh', backgroundColor: '#f5f5f5',
+    }}>
+      <form onSubmit={handleSubmit} style={{
+        background: '#fff', padding: 32, borderRadius: 8,
+        boxShadow: '0 2px 8px rgba(0,0,0,.12)', width: 320,
+      }}>
+        <h2 style={{ margin: '0 0 24px', fontSize: 22 }}>Breakdown</h2>
+        <label style={{ display: 'block', marginBottom: 8, fontSize: 14, fontWeight: 500 }}>
+          Username
+        </label>
+        <input
+          value={username}
+          onChange={e => setUsername(e.target.value)}
+          placeholder="your-username"
+          style={{
+            width: '100%', padding: '8px 12px', borderRadius: 4,
+            border: '1px solid #d1d5db', fontSize: 15, marginBottom: 16,
+          }}
+        />
+        <label style={{ display: 'block', marginBottom: 8, fontSize: 14, fontWeight: 500 }}>
+          Password
+        </label>
+        <input
+          type="password"
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          placeholder="••••••••"
+          style={{
+            width: '100%', padding: '8px 12px', borderRadius: 4,
+            border: '1px solid #d1d5db', fontSize: 15, marginBottom: 16,
+          }}
+        />
+        {error && <p style={{ color: '#dc2626', fontSize: 13, margin: '0 0 12px' }}>{error}</p>}
+        <button
+          type="submit"
+          disabled={loading || !username.trim() || !password}
+          style={{
+            width: '100%', padding: '9px 0', borderRadius: 4,
+            background: '#111', color: '#fff', border: 'none',
+            fontSize: 15, fontWeight: 500,
+            opacity: loading || !username.trim() || !password ? 0.5 : 1,
+          }}
+        >
+          {loading ? 'Logging in…' : 'Login'}
+        </button>
+      </form>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 2: Update App.tsx — RequireAuth uses token, restores on page load**
+
+Replace the contents of `frontend/src/App.tsx`:
+```tsx
+import { useEffect, useState } from 'react'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { getAccessToken, refreshSession, setAccessToken } from './api'
+import Login from './pages/Login'
+import Submit from './pages/Submit'
+import TaskDetail from './pages/TaskDetail'
+import TaskList from './pages/TaskList'
+
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const [checked, setChecked] = useState(false)
+  const [authed, setAuthed] = useState(false)
+
+  useEffect(() => {
+    if (getAccessToken()) {
+      setAuthed(true)
+      setChecked(true)
+      return
+    }
+    // Try to restore session from HttpOnly cookie
+    refreshSession()
+      .then(data => {
+        setAccessToken(data.access_token)
+        setAuthed(true)
+      })
+      .catch(() => setAuthed(false))
+      .finally(() => setChecked(true))
+  }, [])
+
+  if (!checked) return null  // brief flash prevention
+  if (!authed) return <Navigate to="/login" replace />
+  return <>{children}</>
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/tasks" element={<RequireAuth><TaskList /></RequireAuth>} />
+        <Route path="/tasks/:id" element={<RequireAuth><TaskDetail /></RequireAuth>} />
+        <Route path="/submit" element={<RequireAuth><Submit /></RequireAuth>} />
+        <Route path="*" element={<Navigate to="/tasks" replace />} />
+      </Routes>
+    </BrowserRouter>
+  )
+}
+```
+
+- [ ] **Step 3: Build to verify no TypeScript errors**
+
+```bash
+cd frontend && npm run build 2>&1 | tail -20
+```
+Expected: build succeeds with no TypeScript errors. (`cd` back to root after.)
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add frontend/src/pages/Login.tsx frontend/src/App.tsx
+git commit -m "feat: frontend — add password field, JWT-aware RequireAuth with session restore"
+```
+
+---
+
+## Task 12: Test DB infrastructure
+
+**Files:**
+- Modify: `tests/conftest.py`
+
+This replaces the global `AsyncMock` patch with real transaction-scoped DB fixtures. Existing tests will break until Task 13–14 migrate them — that is expected.
+
+- [ ] **Step 1: Rewrite conftest.py**
+
+Replace the entire contents of `tests/conftest.py`:
+```python
+import json
+import os
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://tersecontext:localpassword@172.26.0.7/breakdown_test")
+os.environ.setdefault("SOURCE_DIRS", "/tmp")
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
+os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test")
+os.environ.setdefault("SLACK_APP_TOKEN", "xapp-test")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-32-chars-minimum!")
+
+TEST_DB_URL = os.environ["DATABASE_URL"]
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def db_engine():
+    engine = create_async_engine(TEST_DB_URL, echo=False)
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db_conn(db_engine):
+    """One connection per test. Outer transaction is never committed — always rolled back."""
+    async with db_engine.connect() as conn:
+        await conn.begin()
+        yield conn
+        await conn.rollback()
+
+
+@pytest_asyncio.fixture
+async def db_session(db_conn):
+    """Session bound to the test connection. commit() is overridden to flush() so
+    route handlers can call commit() without destroying the outer transaction."""
+    factory = async_sessionmaker(bind=db_conn, expire_on_commit=False)
+    session = factory()
+    session.commit = session.flush
+    yield session
+    await session.close()
+
+
+@pytest_asyncio.fixture
+async def app_client(db_session):
+    """AsyncClient with get_session overridden to use the transactional test session."""
+    from app.main import app
+    from app.db import get_session
+
+    async def _override():
+        yield db_session
+
+    app.dependency_overrides[get_session] = _override
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+    app.dependency_overrides.pop(get_session, None)
+
+
+@pytest_asyncio.fixture
+async def mock_tc():
+    """TerseContextClient mock that returns a canned context string."""
+    tc = AsyncMock()
+    tc.query.return_value = "canned context: the parser lives in parser.py"
+    tc.health.return_value = {"status": "ok", "node_count": 10, "last_indexed": "2026-01-01"}
+    return tc
+
+
+CANNED_RESEARCH = {
+    "summary": "Add TypeScript parsing to the existing parser module.",
+    "affected_code": [
+        {"file": "parser.py", "change_type": "modify", "description": "add ts token handling"}
+    ],
+    "complexity": {
+        "score": 2,
+        "label": "low",
+        "estimated_effort": "1-2 hours",
+        "reasoning": "isolated change to one module",
+    },
+    "metrics": {
+        "files_affected": 1,
+        "files_created": 0,
+        "files_modified": 1,
+        "services_affected": 0,
+        "contract_changes": False,
+        "new_dependencies": [],
+        "risk_areas": [],
+    },
+}
+
+
+@pytest_asyncio.fixture
+async def mock_anthropic():
+    """AnthropicClient mock that returns canned research JSON."""
+    llm = AsyncMock()
+    response = MagicMock()
+    response.content = json.dumps(CANNED_RESEARCH)
+    llm.chat.return_value = response
+    return llm
+```
+
+- [ ] **Step 2: Run token tests — they should still pass (no DB)**
+
+```bash
+pytest tests/test_token.py -v
+```
+Expected: all 5 PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "feat: replace AsyncMock DB patch with transaction-scoped real DB fixtures"
+```
+
+---
+
+## Task 13: Rewrite test_auth.py
+
+**Files:**
+- Modify: `tests/test_auth.py`
+
+- [ ] **Step 1: Rewrite test_auth.py**
+
+Replace the entire contents of `tests/test_auth.py`:
+```python
+"""
+Auth tests for the JWT-based authentication system.
+"""
+import pytest
+from app.models import User
+from app.token import create_access_token
+import uuid
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def make_user(db_session, username="testuser", role="member", password_hash=None):
+    import bcrypt
+    ph = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode() if password_hash is None else password_hash
+    user = User(username=username, role=role, password_hash=ph)
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.refresh(user)
+    return user
+
+
+def bearer(user: User, session_id=None) -> str:
+    sid = session_id or uuid.uuid4()
+    return create_access_token(user.id, sid, user.role)
+
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+
+async def test_login_success_returns_access_token(app_client, db_session):
+    await make_user(db_session, "alice")
+    r = await app_client.post("/api/auth/login", json={"username": "alice", "password": "password123"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "access_token" in data
+    assert data["user"]["username"] == "alice"
+
+
+async def test_login_wrong_password_returns_401(app_client, db_session):
+    await make_user(db_session, "bob")
+    r = await app_client.post("/api/auth/login", json={"username": "bob", "password": "wrong"})
+    assert r.status_code == 401
+
+
+async def test_login_unknown_user_returns_404(app_client, db_session):
+    r = await app_client.post("/api/auth/login", json={"username": "ghost", "password": "x"})
+    assert r.status_code == 404
+
+
+async def test_login_empty_password_rejected(app_client, db_session):
+    r = await app_client.post("/api/auth/login", json={"username": "alice", "password": ""})
+    assert r.status_code == 422
+
+
+async def test_login_null_hash_sets_password_on_first_login(app_client, db_session):
+    """Existing users with no password can log in once to set it."""
+    user = User(username="legacy", role="member", password_hash=None)
+    db_session.add(user)
+    await db_session.flush()
+
+    r = await app_client.post("/api/auth/login", json={"username": "legacy", "password": "newpass"})
+    assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# GET /api/auth/me
+# ---------------------------------------------------------------------------
+
+async def test_me_with_valid_token(app_client, db_session):
+    user = await make_user(db_session, "carol")
+    r = await app_client.get("/api/auth/me", headers={"Authorization": f"Bearer {bearer(user)}"})
+    assert r.status_code == 200
+    assert r.json()["username"] == "carol"
+
+
+async def test_me_missing_auth_header_returns_422(app_client):
+    r = await app_client.get("/api/auth/me")
+    assert r.status_code == 422
+
+
+async def test_me_invalid_token_returns_401(app_client):
+    r = await app_client.get("/api/auth/me", headers={"Authorization": "Bearer notavalidtoken"})
+    assert r.status_code == 401
+
+
+async def test_me_expired_token_returns_401(app_client, db_session):
+    import app.token as token_module
+    original = token_module.settings.access_token_ttl
+    token_module.settings.access_token_ttl = -1
+    user = await make_user(db_session, "dave")
+    tok = bearer(user)
+    token_module.settings.access_token_ttl = original
+    r = await app_client.get("/api/auth/me", headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# require_admin
+# ---------------------------------------------------------------------------
+
+async def test_admin_endpoint_accessible_by_admin(app_client, db_session):
+    from app.auth import require_admin
+    from app.main import app as fastapi_app
+    admin = await make_user(db_session, "admin2", role="admin")
+    fastapi_app.dependency_overrides[require_admin] = lambda: admin
+    try:
+        r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(admin)}"})
+        assert r.status_code == 200
+    finally:
+        fastapi_app.dependency_overrides.pop(require_admin, None)
+
+
+async def test_admin_endpoint_rejected_for_member(app_client, db_session):
+    member = await make_user(db_session, "member2", role="member")
+    r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(member)}"})
+    assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Refresh, logout, set-password
+# ---------------------------------------------------------------------------
+
+async def test_refresh_returns_new_access_token(app_client, db_session):
+    """POST /api/auth/refresh with a valid cookie issues a new access token."""
+    await make_user(db_session, "refresher")
+    # Login to get a refresh cookie
+    login_r = await app_client.post("/api/auth/login", json={"username": "refresher", "password": "password123"})
+    assert login_r.status_code == 200
+    # The cookie is stored in the client's cookie jar automatically
+    r = await app_client.post("/api/auth/refresh")
+    assert r.status_code == 200
+    assert "access_token" in r.json()
+
+
+async def test_refresh_without_cookie_returns_401(app_client):
+    r = await app_client.post("/api/auth/refresh")
+    assert r.status_code == 401
+
+
+async def test_logout_revokes_session(app_client, db_session):
+    """After logout, the refresh token cookie should no longer work."""
+    await make_user(db_session, "logoutuser")
+    login_r = await app_client.post("/api/auth/login", json={"username": "logoutuser", "password": "password123"})
+    assert login_r.status_code == 200
+    access_token = login_r.json()["access_token"]
+
+    logout_r = await app_client.post(
+        "/api/auth/logout",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert logout_r.status_code == 204
+
+    # Refresh should now fail
+    r = await app_client.post("/api/auth/refresh")
+    assert r.status_code == 401
+
+
+async def test_set_password_updates_and_issues_new_token(app_client, db_session):
+    await make_user(db_session, "changepw")
+    login_r = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "password123"})
+    token = login_r.json()["access_token"]
+
+    r = await app_client.post(
+        "/api/auth/set-password",
+        json={"new_password": "newpassword456"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200
+    assert "access_token" in r.json()
+
+    # Old password should no longer work
+    r2 = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "password123"})
+    assert r2.status_code == 401
+
+    # New password should work
+    r3 = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "newpassword456"})
+    assert r3.status_code == 200
+```
+
+- [ ] **Step 2: Run test_auth.py**
+
+```bash
+pytest tests/test_auth.py -v
+```
+Expected: all tests PASS.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_auth.py
+git commit -m "test: rewrite test_auth.py for JWT-based authentication"
+```
+
+---
+
+## Task 14: Migrate remaining tests
+
+**Files:**
+- Modify: `tests/test_tasks.py`
+- Modify: `tests/test_repos.py`
+- Modify: `tests/test_main.py`
+- Modify: `tests/test_models.py`
+- Modify: `tests/test_researcher.py`
+- Modify: `tests/test_notifier.py`
+- Modify: `tests/test_queue.py`
+- Modify: `tests/test_slack_bot.py`
+- Modify: `tests/test_redis_client.py`
+- Modify: `tests/test_tc_client.py`
+- Modify: `tests/test_query_builder.py`
+
+The key pattern for all route tests:
+- Replace inline `AsyncMock` session + `app.dependency_overrides[get_session]` setup with `app_client` fixture
+- Replace `AsyncMock` user objects with real `User` rows inserted via `db_session`
+- Replace `app.dependency_overrides[get_current_user]` with a helper that inserts a real user and creates a valid JWT header
+- Keep `mock_tc` and `mock_anthropic` where research is involved
+
+Helper to add at the top of each test file that tests routes:
+```python
+from app.token import create_access_token
+import uuid as _uuid
+
+def auth_header(user):
+    token = create_access_token(user.id, _uuid.uuid4(), user.role)
+    return {"Authorization": f"Bearer {token}"}
+```
+
+- [ ] **Step 1: Run the current test suite to see the failure scope**
+
+```bash
+pytest --tb=no -q 2>&1 | tail -20
+```
+Note which test files fail.
+
+- [ ] **Step 2: Migrate test_tasks.py**
+
+The tests in `test_tasks.py` all use inline `AsyncMock` sessions. Replace with `app_client` + `db_session`. The core pattern:
+
+```python
+# OLD
+async def test_get_task_returns_task():
+    session = make_mock_session(task=make_task())
+    override_session(session)
+    async with AsyncClient(...) as client:
+        r = await client.get(f"/api/tasks/{TASK_ID}", headers={"X-User": "kmcbeth"})
+
+# NEW
+async def test_get_task_returns_task(app_client, db_session):
+    user = User(username="kmcbeth", role="member", password_hash="x")
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.refresh(user)
+    task = Task(
+        feature_name="ts-parser",
+        description="Add TypeScript support",
+        repo="tersecontext",
+        branch_from="main",
+        submitter_id=user.id,
+    )
+    db_session.add(task)
+    await db_session.flush()
+    await db_session.refresh(task)
+
+    token = create_access_token(user.id, uuid.uuid4(), user.role)
+    r = await app_client.get(f"/api/tasks/{task.id}", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert r.json()["feature_name"] == "ts-parser"
+```
+
+Apply this pattern to all tasks in `test_tasks.py`. For tests that test research (which uses `app.state.tc_client` and `app.state.llm_client`), set those on the app state in the test:
+```python
+from app.main import app as fastapi_app
+fastapi_app.state.tc_client = mock_tc
+fastapi_app.state.llm_client = mock_anthropic
+```
+
+- [ ] **Step 3: Run test_tasks.py**
+
+```bash
+pytest tests/test_tasks.py -v
+```
+Expected: all PASS.
+
+- [ ] **Step 4: Commit test_tasks.py**
+
+```bash
+git add tests/test_tasks.py
+git commit -m "test: migrate test_tasks.py to real DB + JWT auth"
+```
+
+- [ ] **Step 5: Migrate and commit remaining test files one by one**
+
+For each of `test_repos.py`, `test_main.py`, `test_models.py`, `test_researcher.py`, `test_notifier.py`, `test_queue.py`, `test_slack_bot.py`, `test_redis_client.py`, `test_tc_client.py`, `test_query_builder.py`:
+
+1. Replace `X-User` headers with `Authorization: Bearer` headers using `create_access_token`
+2. Replace inline `AsyncMock` session patterns with `app_client` + `db_session`
+3. Keep non-DB tests (unit tests for clients, query builder, etc.) as-is — they don't need `app_client`
+4. Run the file: `pytest tests/test_<name>.py -v` — confirm all pass
+5. Commit: `git add tests/test_<name>.py && git commit -m "test: migrate test_<name>.py to real DB + JWT auth"`
+
+- [ ] **Step 6: Run the full test suite**
+
+```bash
+pytest -v
+```
+Expected: all tests pass. If any fail, fix before proceeding.
+
+- [ ] **Step 7: Final commit if clean**
+
+```bash
+git status   # confirm only test files are staged; .env must not appear
+git add tests/
+git commit -m "test: complete migration to transaction-scoped real DB fixtures"
+```
+
+---
+
+## Task 15: Update README
+
+**Files:**
+- Modify: `README.md`
+
+- [ ] **Step 1: Update Local Development section**
+
+Add to the "Running Tests" section in `README.md`:
+```markdown
+**Before running tests**, migrate the test database:
+```bash
+DATABASE_URL=postgresql+asyncpg://tersecontext:localpassword@172.26.0.7/breakdown_test \
+  alembic upgrade head
+```
+
+- [ ] **Step 2: Update configuration table**
+
+Add these rows to the configuration table:
+```markdown
+| `SECRET_KEY` | (required) | Secret for signing JWTs — min 32 chars |
+| `ACCESS_TOKEN_TTL` | `900` | Access token lifetime in seconds (15 min) |
+| `REFRESH_TOKEN_TTL` | `604800` | Refresh token lifetime in seconds (7 days) |
+| `CORS_ORIGINS` | `[]` | Allowed CORS origins e.g. `["http://localhost:5173"]` |
+```
+
+- [ ] **Step 3: Update Auth section**
+
+Replace the existing auth description with:
+```markdown
+## Authentication
+
+Breakdown uses username + password login. On first login, any password is accepted and stored (for existing users created before this feature). Subsequent logins require the stored password.
+
+Login returns a short-lived JWT access token (15 min) and sets an HttpOnly refresh token cookie (7 days). The frontend stores the access token in memory and refreshes automatically.
+
+To change a password after login, `POST /api/auth/set-password` with `{"new_password": "..."}` and a valid Bearer token.
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add README.md
+git commit -m "docs: update README for JWT auth and test DB prerequisite"
+```
