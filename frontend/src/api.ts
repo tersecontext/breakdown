@@ -101,6 +101,9 @@ export const getTask = (id: string): Promise<TaskOut> => apiFetch(`/api/tasks/${
 export const createTask = (body: TaskCreate): Promise<TaskOut> =>
   apiFetch('/api/tasks', { method: 'POST', body: JSON.stringify(body) });
 
+export const retryTask = (id: string): Promise<TaskOut> =>
+  apiFetch(`/api/tasks/${id}/retry`, { method: 'POST' });
+
 export const approveTask = (id: string): Promise<TaskOut> =>
   apiFetch(`/api/tasks/${id}/approve`, { method: 'POST' });
 

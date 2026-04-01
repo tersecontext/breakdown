@@ -103,6 +103,43 @@ async def get_task(
     return task
 
 
+@router.post("/api/tasks/{task_id}/retry", response_model=TaskOut)
+async def retry_task(
+    task_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Task).where(Task.id == task_id).options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.state != "failed":
+        raise HTTPException(status_code=409, detail=f"Task is in state '{task.state}', expected 'failed'")
+
+    task.state = "submitted"
+    task.error_message = None
+    task.tc_context = None
+    task.research = None
+    session.add(TaskLog(task_id=task.id, event="task_retried", actor_id=user.id))
+    await session.commit()
+
+    result = await session.execute(
+        select(Task).where(Task.id == task.id).options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one()
+
+    t = asyncio.create_task(
+        research(task.id, request.app.state.tc_client, request.app.state.llm_client)
+    )
+    request.app.state.background_tasks.add(t)
+    t.add_done_callback(request.app.state.background_tasks.discard)
+
+    return task
+
+
 @router.post("/api/tasks/{task_id}/approve", response_model=TaskOut)
 async def approve_task(
     task_id: UUID,

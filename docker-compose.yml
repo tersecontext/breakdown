@@ -33,7 +33,6 @@ services:
       TERSECONTEXT_URL: ${TERSECONTEXT_URL:-http://host.docker.internal:8090}
       REPO_WATCHER_URL: ${REPO_WATCHER_URL:-http://repo-watcher:8080}
       REPOS_DIR: /repos
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-tc-tasks}
@@ -42,6 +41,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
     volumes:
       - ${REPOS_DIR}:/repos:ro
+      - ${HOME}/.claude:/root/.claude:ro
     depends_on:
       postgres:
         condition: service_healthy

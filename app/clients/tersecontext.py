@@ -19,7 +19,7 @@ class TerseContextClient:
             try:
                 response = await self._client.post(
                     f"{self.base_url}/query",
-                    json={"query": query_text, "repo": repo},
+                    json={"question": query_text, "repo": repo},
                 )
                 response.raise_for_status()
                 return response.text

@@ -69,7 +69,7 @@ async def get_branches(name: str):
         raise HTTPException(status_code=404, detail=f"Repo '{name}' not found")
 
     result = subprocess.run(
-        ["git", "-C", repo["path"], "branch", "-a"],
+        ["git", "-C", repo["path"], "branch"],
         capture_output=True,
         text=True,
     )

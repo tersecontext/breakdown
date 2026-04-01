@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { approveTask, rejectTask, getTask } from '../api'
+import { approveTask, rejectTask, retryTask, getTask } from '../api'
 import Nav from '../components/Nav'
 import ResearchView from '../components/ResearchView'
 import StateBadge from '../components/StateBadge'
@@ -81,20 +81,49 @@ export default function TaskDetail() {
 
         {/* State-dependent content */}
         <div style={{ background: '#fff', borderRadius: 8, padding: 24, boxShadow: '0 2px 8px rgba(0,0,0,.08)' }}>
-          {(task.state === 'submitted' || task.state === 'researching') && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: '#6b7280', padding: '24px 0' }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                style={{ animation: 'spin 1s linear infinite' }}>
-                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
-              </svg>
-              <span>Analyzing codebase…</span>
-              <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
-            </div>
-          )}
+          {(task.state === 'submitted' || task.state === 'researching') && (() => {
+            const STEP_LABELS: Record<string, string> = {
+              task_created: 'Queued…',
+              task_retried: 'Queued…',
+              research_started: 'Starting research…',
+              querying_codebase: 'Querying codebase…',
+              analyzing: 'Analyzing with Claude…',
+            }
+            const latest = [...task.logs].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0]
+            const label = (latest && STEP_LABELS[latest.event]) ?? 'Analyzing codebase…'
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: '#6b7280', padding: '24px 0' }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                  style={{ animation: 'spin 1s linear infinite' }}>
+                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+                </svg>
+                <span>{label}</span>
+                <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+              </div>
+            )
+          })()}
 
           {task.state === 'failed' && (
-            <div style={{ color: '#dc2626' }}>
-              <strong>Error:</strong> {task.error_message ?? 'Unknown error'}
+            <div>
+              <div style={{ color: '#dc2626', marginBottom: 12 }}>
+                <strong>Error:</strong> {task.error_message ?? 'Unknown error'}
+              </div>
+              <button
+                onClick={async () => {
+                  if (!id) return
+                  setActing(true)
+                  try { setTask(await retryTask(id)) }
+                  catch (e) { setError(String(e)) }
+                  finally { setActing(false) }
+                }}
+                disabled={acting}
+                style={{
+                  padding: '8px 20px', borderRadius: 4, background: '#111', color: '#fff',
+                  border: 'none', fontSize: 14, fontWeight: 500, opacity: acting ? 0.5 : 1,
+                }}
+              >
+                {acting ? 'Retrying…' : 'Retry'}
+              </button>
             </div>
           )}
 

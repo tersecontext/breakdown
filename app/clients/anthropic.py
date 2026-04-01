@@ -26,7 +26,7 @@ class AnthropicClient:
         self.api_key = api_key
         self.model = model
 
-    async def chat(self, system: str, messages: list[dict]) -> LLMResponse:
+    async def chat(self, system: str, messages: list[dict], cwd: str | None = None) -> LLMResponse:
         if not messages:
             raise ValueError("messages must not be empty")
 
@@ -52,6 +52,7 @@ class AnthropicClient:
                         system_prompt=system,
                         model=self.model,
                         allowed_tools=[],
+                        cwd=cwd,
                     ),
                 ):
                     if isinstance(message, ResultMessage):
