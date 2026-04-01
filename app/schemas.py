@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # --- User schemas ---
@@ -136,9 +136,16 @@ class BranchOut(BaseModel):
 
 class LoginRequest(BaseModel):
     username: str
+    password: str = Field(..., min_length=1)
 
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
 
-class LoginResponse(BaseModel):
-    id: uuid.UUID
-    username: str
-    role: str
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class SetPasswordRequest(BaseModel):
+    new_password: str = Field(..., min_length=1)
