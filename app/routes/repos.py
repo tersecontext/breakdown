@@ -25,18 +25,16 @@ def _find_repos() -> list[dict]:
 async def get_repos():
     tc = TerseContextClient(settings.tersecontext_url)
     try:
+        indexed = await tc.indexed_repos()
         repos = []
         for repo in _find_repos():
-            health = await tc.health()
-            tc_indexed = health is not None
-            tc_node_count = health.get("node_count") if health else None
-            tc_last_indexed = health.get("last_indexed") if health else None
+            tc_indexed = indexed is not None and repo["name"] in indexed
             repos.append({
                 "name": repo["name"],
                 "path": repo["path"],
                 "tc_indexed": tc_indexed,
-                "tc_node_count": tc_node_count,
-                "tc_last_indexed": tc_last_indexed,
+                "tc_node_count": None,
+                "tc_last_indexed": None,
             })
         return repos
     finally:

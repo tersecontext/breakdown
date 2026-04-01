@@ -37,8 +37,10 @@ services:
       SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-tc-tasks}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-sonnet-4-20250514}
+      SECRET_KEY: ${SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
     volumes:
-      - ${HOME}/workspaces:/repos:ro
+      - ${SOURCE_DIRS}:/repos:ro
     depends_on:
       postgres:
         condition: service_healthy

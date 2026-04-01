@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
                     if not cursor:
                         break
             finally:
-                await web_client.close()
+                await web_client.session.close()
 
             if channel_id is None:
                 logger.warning(

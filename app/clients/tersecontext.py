@@ -34,5 +34,12 @@ class TerseContextClient:
         except Exception:
             return None
 
+    async def indexed_repos(self) -> list[str] | None:
+        try:
+            response = await self._client.get(f"{self.base_url}/repos")
+            return response.json()
+        except Exception:
+            return None
+
     async def close(self):
         await self._client.aclose()
