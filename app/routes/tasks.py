@@ -37,6 +37,7 @@ async def create_task(
         state="submitted",
     )
     session.add(task)
+    await session.flush()
     session.add(TaskLog(task_id=task.id, event="task_created", actor_id=user.id))
     await session.commit()
 
