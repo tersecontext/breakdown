@@ -1,0 +1,9 @@
+.env
+.git
+__pycache__
+*.pyc
+tests/
+docs/
+breakdown-plans/
+SUBTASK.md
+*.egg-info/

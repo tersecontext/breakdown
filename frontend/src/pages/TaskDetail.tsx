@@ -1,0 +1,170 @@
+import { useCallback, useEffect, useState } from 'react'
+import { useParams } from 'react-router-dom'
+import { approveTask, rejectTask, getTask } from '../api'
+import Nav from '../components/Nav'
+import ResearchView from '../components/ResearchView'
+import StateBadge from '../components/StateBadge'
+import type { TaskOut } from '../types'
+
+export default function TaskDetail() {
+  const { id } = useParams<{ id: string }>()
+  const [task, setTask] = useState<TaskOut | null>(null)
+  const [error, setError] = useState('')
+  const [rejecting, setRejecting] = useState(false)
+  const [rejectReason, setRejectReason] = useState('')
+  const [acting, setActing] = useState(false)
+  const role = localStorage.getItem('role') ?? 'member'
+  const isAdmin = role === 'admin'
+
+  const load = useCallback(() => {
+    if (!id) return
+    getTask(id).then(setTask).catch(e => setError(String(e)))
+  }, [id])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  useEffect(() => {
+    if (!task) return
+    if (task.state === 'submitted' || task.state === 'researching') {
+      const timer = setInterval(load, 3000)
+      return () => clearInterval(timer)
+    }
+  }, [task?.state, load])
+
+  async function handleApprove() {
+    if (!id) return
+    setActing(true)
+    try {
+      setTask(await approveTask(id))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setActing(false)
+    }
+  }
+
+  async function handleReject() {
+    if (!id) return
+    setActing(true)
+    try {
+      setTask(await rejectTask(id, rejectReason || undefined))
+      setRejecting(false)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setActing(false)
+    }
+  }
+
+  if (!task && !error) return <><Nav /><div style={{ padding: 32 }}>Loading…</div></>
+  if (error && !task) return <><Nav /><div style={{ padding: 32, color: '#dc2626' }}>{error}</div></>
+  if (!task) return null
+
+  return (
+    <>
+      <Nav />
+      <div style={{ maxWidth: 800, margin: '32px auto', padding: '0 16px' }}>
+        {/* Header */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <h2 style={{ margin: 0, fontSize: 22 }}>{task.feature_name}</h2>
+            <StateBadge state={task.state} />
+          </div>
+          <div style={{ fontSize: 13, color: '#6b7280', display: 'flex', gap: 16 }}>
+            <span>Repo: <code>{task.repo}</code></span>
+            <span>Branch: <code>{task.branch_from}</code></span>
+            <span>Submitted: {new Date(task.created_at).toLocaleString()}</span>
+          </div>
+        </div>
+
+        {/* State-dependent content */}
+        <div style={{ background: '#fff', borderRadius: 8, padding: 24, boxShadow: '0 2px 8px rgba(0,0,0,.08)' }}>
+          {(task.state === 'submitted' || task.state === 'researching') && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: '#6b7280', padding: '24px 0' }}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                style={{ animation: 'spin 1s linear infinite' }}>
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+              <span>Analyzing codebase…</span>
+              <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+
+          {task.state === 'failed' && (
+            <div style={{ color: '#dc2626' }}>
+              <strong>Error:</strong> {task.error_message ?? 'Unknown error'}
+            </div>
+          )}
+
+          {task.research && (
+            <>
+              {task.state === 'approved' && (
+                <div style={{
+                  display: 'inline-block', marginBottom: 16, padding: '4px 12px', borderRadius: 4,
+                  background: '#dcfce7', color: '#16a34a', fontSize: 13, fontWeight: 600,
+                }}>
+                  ✓ Approved
+                </div>
+              )}
+              {task.state === 'rejected' && (
+                <div style={{
+                  display: 'inline-block', marginBottom: 16, padding: '4px 12px', borderRadius: 4,
+                  background: '#fee2e2', color: '#dc2626', fontSize: 13, fontWeight: 600,
+                }}>
+                  ✗ Rejected
+                </div>
+              )}
+              <ResearchView research={task.research} />
+              {task.state === 'researched' && isAdmin && (
+                <div style={{ marginTop: 24, display: 'flex', gap: 12, flexDirection: 'column', alignItems: 'flex-start' }}>
+                  {rejecting ? (
+                    <div style={{ width: '100%' }}>
+                      <textarea
+                        value={rejectReason}
+                        onChange={e => setRejectReason(e.target.value)}
+                        placeholder="Reason for rejection (optional)"
+                        rows={3}
+                        style={{ width: '100%', padding: '8px 12px', borderRadius: 4, border: '1px solid #d1d5db', fontSize: 14, marginBottom: 8 }}
+                      />
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button onClick={handleReject} disabled={acting} style={{
+                          padding: '8px 16px', borderRadius: 4, background: '#dc2626', color: '#fff',
+                          border: 'none', fontSize: 14, fontWeight: 500, opacity: acting ? 0.5 : 1,
+                        }}>
+                          {acting ? 'Rejecting…' : 'Confirm Reject'}
+                        </button>
+                        <button onClick={() => setRejecting(false)} style={{
+                          padding: '8px 16px', borderRadius: 4, background: '#f3f4f6',
+                          color: '#111', border: '1px solid #d1d5db', fontSize: 14,
+                        }}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button onClick={handleApprove} disabled={acting} style={{
+                        padding: '8px 20px', borderRadius: 4, background: '#16a34a', color: '#fff',
+                        border: 'none', fontSize: 14, fontWeight: 500, opacity: acting ? 0.5 : 1,
+                      }}>
+                        {acting ? '…' : 'Approve'}
+                      </button>
+                      <button onClick={() => setRejecting(true)} style={{
+                        padding: '8px 20px', borderRadius: 4, background: '#fff', color: '#dc2626',
+                        border: '1px solid #dc2626', fontSize: 14, fontWeight: 500,
+                      }}>
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </>
+  )
+}
