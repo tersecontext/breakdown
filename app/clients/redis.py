@@ -11,7 +11,7 @@ class RedisQueue:
 
     async def push_approved(self, bundle: dict) -> None:
         fields = {
-            k: json.dumps(v) if k in COMPLEX_FIELDS else v
+            k: json.dumps(v) if k in COMPLEX_FIELDS else str(v)
             for k, v in bundle.items()
         }
         await self._redis.xadd("stream:breakdown-approved", fields)
