@@ -7,6 +7,17 @@ export interface User {
   created_at: string;
 }
 
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+export interface RefreshResponse {
+  access_token: string;
+  token_type: string;
+}
+
 export interface AffectedFile {
   file: string;
   change_type: 'create' | 'modify' | 'delete';
