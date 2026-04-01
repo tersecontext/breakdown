@@ -148,7 +148,9 @@ async def logout(
     _user: User = Depends(get_current_user),
 ):
     auth = request.headers.get("Authorization", "")
-    token = auth[7:]  # already validated by get_current_user
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization header")
+    token = auth[7:]
     payload = decode_access_token(token)
     jti = payload["jti"]
 
