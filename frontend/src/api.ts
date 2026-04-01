@@ -91,6 +91,9 @@ export const listRepos = (): Promise<RepoInfo[]> => apiFetch('/api/repos');
 export const getBranches = (repo: string): Promise<string[]> =>
   apiFetch(`/api/repos/${encodeURIComponent(repo)}/branches`);
 
+export const indexRepo = (repo: string): Promise<{ queued: boolean }> =>
+  apiFetch(`/api/repos/${encodeURIComponent(repo)}/index`, { method: 'POST' });
+
 export const listTasks = (): Promise<TaskListItem[]> => apiFetch('/api/tasks');
 
 export const getTask = (id: string): Promise<TaskOut> => apiFetch(`/api/tasks/${id}`);

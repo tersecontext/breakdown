@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { createTask, getBranches, listRepos } from '../api'
+import { createTask, getBranches, indexRepo, listRepos } from '../api'
 import Nav from '../components/Nav'
 import type { RepoInfo } from '../types'
 
@@ -20,6 +20,7 @@ export default function Submit() {
   const [constraints, setConstraints] = useState('')
   const [testingNotes, setTestingNotes] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [indexing, setIndexing] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -95,15 +96,41 @@ export default function Submit() {
               ))}
             </select>
             {selectedRepo && (
-              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 12, color: '#6b7280', marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{
                   width: 8, height: 8, borderRadius: '50%',
                   backgroundColor: selectedRepo.tc_indexed ? '#16a34a' : '#dc2626',
-                  display: 'inline-block',
+                  display: 'inline-block', flexShrink: 0,
                 }} />
-                {selectedRepo.tc_indexed
-                  ? `${selectedRepo.tc_node_count ?? '?'} nodes · last indexed ${selectedRepo.tc_last_indexed ? new Date(selectedRepo.tc_last_indexed).toLocaleDateString() : 'unknown'}`
-                  : 'Not indexed'}
+                <span>
+                  {selectedRepo.tc_indexed
+                    ? `${selectedRepo.tc_node_count ?? '?'} nodes · last indexed ${selectedRepo.tc_last_indexed ? new Date(selectedRepo.tc_last_indexed).toLocaleDateString() : 'unknown'}`
+                    : 'Not indexed'}
+                </span>
+                <button
+                  type="button"
+                  disabled={indexing}
+                  onClick={async () => {
+                    setIndexing(true)
+                    setError('')
+                    try {
+                      await indexRepo(repo)
+                      const updated = await listRepos()
+                      setRepos(updated)
+                    } catch (e) {
+                      setError(String(e))
+                    } finally {
+                      setIndexing(false)
+                    }
+                  }}
+                  style={{
+                    padding: '2px 8px', borderRadius: 4, border: '1px solid #d1d5db',
+                    background: '#f9fafb', fontSize: 11, cursor: 'pointer',
+                    opacity: indexing ? 0.5 : 1,
+                  }}
+                >
+                  {indexing ? 'Indexing…' : 'Index now'}
+                </button>
               </div>
             )}
           </div>

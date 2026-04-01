@@ -41,6 +41,21 @@ async def get_repos():
         await tc.close()
 
 
+@router.post("/{name}/index", status_code=202)
+async def index_repo(name: str):
+    repo = next((r for r in _find_repos() if r["name"] == name), None)
+    if repo is None:
+        raise HTTPException(status_code=404, detail=f"Repo '{name}' not found")
+    tc = TerseContextClient(settings.repo_watcher_url)
+    try:
+        result = await tc.index_repo(repo["path"], full_rescan=True)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Index request failed: {exc}")
+    finally:
+        await tc.close()
+
+
 @router.get("/{name}/branches")
 async def get_branches(name: str):
     repo = next((r for r in _find_repos() if r["name"] == name), None)
