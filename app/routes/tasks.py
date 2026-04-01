@@ -166,4 +166,9 @@ async def reject_task(
     detail = {"reason": body.reason} if body.reason else None
     session.add(TaskLog(task_id=task.id, event="task_rejected", actor_id=user.id, detail=detail))
     await session.commit()
-    return task
+
+    # Re-fetch so the task_rejected log appears in the response
+    result = await session.execute(
+        select(Task).where(Task.id == task_id).options(selectinload(Task.logs))
+    )
+    return result.scalar_one()

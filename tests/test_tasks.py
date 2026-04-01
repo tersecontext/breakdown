@@ -234,7 +234,9 @@ async def test_reject_task_sets_rejected_state():
         )
 
     assert response.status_code == 200
-    assert task.state == "rejected"
+    data = response.json()
+    assert data["state"] == "rejected"
+    assert "logs" in data  # re-fetch means logs are included
 
 
 @pytest.mark.asyncio
