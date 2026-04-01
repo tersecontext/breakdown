@@ -46,6 +46,7 @@ async def research(
     task_id: UUID,
     tc_client: TerseContextClient,
     llm_client: AnthropicClient,
+    notify=None,
 ) -> None:
     async with AsyncSessionLocal() as session:
         task = None
@@ -107,6 +108,11 @@ async def research(
             task.state = "researched"
             session.add(TaskLog(task_id=task.id, event="research_completed"))
             await session.commit()
+            if notify is not None:
+                try:
+                    await notify(task)
+                except Exception:
+                    logger.exception("notify failed for task %s", task_id)
 
         except Exception as e:
             error_message = str(e)
@@ -121,6 +127,11 @@ async def research(
                 ))
                 try:
                     await session.commit()
+                    if notify is not None:
+                        try:
+                            await notify(task)
+                        except Exception:
+                            logger.exception("notify failed for task %s", task_id)
                 except Exception:
                     logger.exception("failed to commit error state for task %s", task_id)
                     await session.rollback()
