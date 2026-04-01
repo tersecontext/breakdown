@@ -2,7 +2,6 @@ import json
 import logging
 from uuid import UUID
 
-from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.clients.anthropic import AnthropicClient
@@ -92,14 +91,13 @@ async def research(
             try:
                 parsed = json.loads(response.content)
             except json.JSONDecodeError:
-                corrective = (
-                    f"Your previous response was not valid JSON. "
-                    f"Here is what you returned:\n\n{response.content}\n\n"
-                    f"Respond with only the JSON object, no other text."
-                )
                 response = await llm_client.chat(
                     system=RESEARCH_SYSTEM_PROMPT,
-                    messages=[{"role": "user", "content": corrective}],
+                    messages=[
+                        {"role": "user", "content": user_message},
+                        {"role": "assistant", "content": response.content},
+                        {"role": "user", "content": "Your previous response was not valid JSON. Respond with only the JSON object, no other text."},
+                    ],
                 )
                 parsed = json.loads(response.content)
 
@@ -121,4 +119,8 @@ async def research(
                     event="research_failed",
                     detail={"error": error_message},
                 ))
-                await session.commit()
+                try:
+                    await session.commit()
+                except Exception:
+                    logger.exception("failed to commit error state for task %s", task_id)
+                    await session.rollback()
