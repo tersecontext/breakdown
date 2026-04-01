@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { approveTask, rejectTask, getTask } from '../api'
 import Nav from '../components/Nav'
@@ -16,14 +16,14 @@ export default function TaskDetail() {
   const role = localStorage.getItem('role') ?? 'member'
   const isAdmin = role === 'admin'
 
-  function load() {
+  const load = useCallback(() => {
     if (!id) return
     getTask(id).then(setTask).catch(e => setError(String(e)))
-  }
+  }, [id])
 
   useEffect(() => {
     load()
-  }, [id])
+  }, [load])
 
   useEffect(() => {
     if (!task) return
@@ -31,7 +31,7 @@ export default function TaskDetail() {
       const timer = setInterval(load, 3000)
       return () => clearInterval(timer)
     }
-  }, [task?.state])
+  }, [task?.state, load])
 
   async function handleApprove() {
     if (!id) return

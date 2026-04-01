@@ -26,7 +26,7 @@ export default function Submit() {
     listRepos().then(r => {
       setRepos(r)
       if (r.length > 0) setRepo(r[0].name)
-    })
+    }).catch(e => setError(String(e)))
   }, [])
 
   useEffect(() => {
@@ -34,7 +34,7 @@ export default function Submit() {
     getBranches(repo).then(b => {
       setBranches(b)
       setBranch(b.includes('main') ? 'main' : (b[0] ?? ''))
-    })
+    }).catch(e => setError(String(e)))
   }, [repo])
 
   function addPill() {
