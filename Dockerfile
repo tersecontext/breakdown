@@ -4,7 +4,10 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY app/ ./app/
+COPY alembic.ini .
+COPY alembic/ ./alembic/
 
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -e .
 
 EXPOSE 8000
