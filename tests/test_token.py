@@ -1,4 +1,3 @@
-import time
 import pytest
 import jwt as pyjwt
 import uuid
@@ -16,12 +15,10 @@ def test_create_and_decode_roundtrip():
     assert payload["role"] == "admin"
 
 
-def test_expired_token_raises():
+def test_expired_token_raises(monkeypatch):
     import app.token as token_module
-    original_ttl = token_module.settings.access_token_ttl
-    token_module.settings.access_token_ttl = -1  # already expired
+    monkeypatch.setattr(token_module.settings, "access_token_ttl", -1)
     token = create_access_token(uuid.uuid4(), uuid.uuid4(), "member")
-    token_module.settings.access_token_ttl = original_ttl
     with pytest.raises(pyjwt.ExpiredSignatureError):
         decode_access_token(token)
 
@@ -39,7 +36,8 @@ def test_generate_refresh_token_returns_pair():
     assert hashed == hash_refresh_token(raw)
 
 
-def test_hash_refresh_token_is_deterministic():
-    raw, h1 = generate_refresh_token()
-    h2 = hash_refresh_token(raw)
-    assert h1 == h2
+def test_different_raw_tokens_produce_different_hashes():
+    raw1, h1 = generate_refresh_token()
+    raw2, h2 = generate_refresh_token()
+    assert h1 != h2
+    assert len(h1) == 64  # SHA-256 hex digest is 64 chars

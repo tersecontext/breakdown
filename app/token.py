@@ -39,4 +39,5 @@ def generate_refresh_token() -> tuple[str, str]:
 
 
 def hash_refresh_token(raw: str) -> str:
+    """SHA-256 hash a raw refresh token for DB lookup. Counterpart to generate_refresh_token."""
     return hashlib.sha256(raw.encode()).hexdigest()
