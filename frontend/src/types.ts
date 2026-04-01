@@ -7,6 +7,17 @@ export interface User {
   created_at: string;
 }
 
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  user: User;
+}
+
+export interface RefreshResponse {
+  access_token: string;
+  token_type: string;
+}
+
 export interface AffectedFile {
   file: string;
   change_type: 'create' | 'modify' | 'delete';
@@ -89,4 +100,12 @@ export interface TaskCreate {
   branch_from: string;
   additional_context: string[];
   optional_answers: Record<string, unknown>;
+}
+
+export interface TaskResubmit {
+  feature_name?: string;
+  description?: string;
+  repo?: string;
+  branch_from?: string;
+  additional_context?: string[];
 }

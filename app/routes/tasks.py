@@ -13,7 +13,7 @@ from app.db import get_session
 from app.engine.queue import publish_approved_task
 from app.engine.researcher import research
 from app.models import Task, TaskLog, User
-from app.schemas import TaskCreate, TaskListItem, TaskOut, TaskReject
+from app.schemas import TaskCreate, TaskListItem, TaskOut, TaskReject, TaskResubmit
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,6 +37,7 @@ async def create_task(
         state="submitted",
     )
     session.add(task)
+    await session.flush()
     session.add(TaskLog(task_id=task.id, event="task_created", actor_id=user.id))
     await session.commit()
 
@@ -99,6 +100,101 @@ async def get_task(
     task = result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@router.post("/api/tasks/{task_id}/retry", response_model=TaskOut)
+async def retry_task(
+    task_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Task).where(Task.id == task_id).options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.state != "failed":
+        raise HTTPException(status_code=409, detail=f"Task is in state '{task.state}', expected 'failed'")
+
+    task.state = "submitted"
+    task.error_message = None
+    task.tc_context = None
+    task.research = None
+    session.add(TaskLog(task_id=task.id, event="task_retried", actor_id=user.id))
+    await session.commit()
+
+    # Expire the logs relationship so it's re-fetched, since the test fixture has expire_on_commit=False
+    session.expire(task, ["logs"])
+
+    result = await session.execute(
+        select(Task).where(Task.id == task.id).options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one()
+
+    t = asyncio.create_task(
+        research(task.id, request.app.state.tc_client, request.app.state.llm_client)
+    )
+    request.app.state.background_tasks.add(t)
+    t.add_done_callback(request.app.state.background_tasks.discard)
+
+    return task
+
+
+@router.post("/api/tasks/{task_id}/resubmit", response_model=TaskOut)
+async def resubmit_task(
+    task_id: UUID,
+    body: TaskResubmit,
+    request: Request,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Task).where(Task.id == task_id).options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.state != "rejected":
+        raise HTTPException(status_code=409, detail=f"Task is in state '{task.state}', expected 'rejected'")
+    if task.submitter_id != user.id and user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only the original submitter or an admin can resubmit")
+
+    if body.feature_name is not None:
+        task.feature_name = body.feature_name
+    if body.description is not None:
+        task.description = body.description
+    if body.repo is not None:
+        task.repo = body.repo
+    if body.branch_from is not None:
+        task.branch_from = body.branch_from
+    if body.additional_context is not None:
+        task.additional_context = body.additional_context
+
+    task.state = "submitted"
+    task.error_message = None
+    task.tc_context = None
+    task.research = None
+    session.add(TaskLog(task_id=task.id, event="task_resubmitted", actor_id=user.id))
+    await session.commit()
+
+    # Expire the logs relationship so it's re-fetched, since the test fixture has expire_on_commit=False
+    session.expire(task, ["logs"])
+
+    result = await session.execute(
+        select(Task).where(Task.id == task.id)
+        .options(selectinload(Task.logs), selectinload(Task.submitter))
+    )
+    task = result.scalar_one()
+
+    t = asyncio.create_task(
+        research(task.id, request.app.state.tc_client, request.app.state.llm_client)
+    )
+    request.app.state.background_tasks.add(t)
+    t.add_done_callback(request.app.state.background_tasks.discard)
+
     return task
 
 

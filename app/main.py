@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
                     if not cursor:
                         break
             finally:
-                await web_client.close()
+                await web_client.session.close()
 
             if channel_id is None:
                 logger.warning(
@@ -94,7 +94,7 @@ app = FastAPI(title="Breakdown", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

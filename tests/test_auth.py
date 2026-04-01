@@ -1,197 +1,192 @@
 """
-Tests for authentication and authorisation:
-  - POST /api/auth/login: creates user if not exists, returns existing user
-  - GET /api/auth/me: X-User header resolves to the correct user
-  - Missing X-User header returns 422 (FastAPI enforces required Header)
-  - Unknown X-User returns 401 (user not found in DB)
-  - require_admin passes for admin role, rejects member with 403
+Auth tests for the JWT-based authentication system.
 """
-import uuid
-from datetime import datetime, timezone
-
 import pytest
-from fastapi import HTTPException
-from httpx import ASGITransport, AsyncClient
-from unittest.mock import AsyncMock, MagicMock
-
-from app.auth import get_current_user, require_admin
-from app.db import get_session
-from app.main import app
+import uuid
 from app.models import User
-
-NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-ADMIN_ID = uuid.uuid4()
-MEMBER_ID = uuid.uuid4()
-
-admin_user = User(id=ADMIN_ID, username="admin", role="admin")
-admin_user.created_at = NOW
-
-member_user = User(id=MEMBER_ID, username="kmcbeth", role="member")
-member_user.created_at = NOW
-
-
-def make_empty_session():
-    """Session that returns an empty result set (used to satisfy list_users etc.)"""
-    session = AsyncMock()
-    result = MagicMock()
-    result.scalars.return_value.all.return_value = []
-    result.scalar_one_or_none.return_value = None
-    session.execute.return_value = result
-    return session
-
-
-def override_session(session):
-    async def _override():
-        yield session
-
-    app.dependency_overrides[get_session] = _override
-
-
-@pytest.fixture(autouse=True)
-def clear_overrides():
-    yield
-    app.dependency_overrides.clear()
+from app.token import create_access_token
 
 
 # ---------------------------------------------------------------------------
-# Login tests
+# Helpers
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.asyncio
-async def test_login_creates_user_if_not_exists():
-    """POST /api/auth/login creates and returns a new user when username is unknown."""
-    session = AsyncMock()
-
-    # First execute: find-by-username → not found
-    find_result = MagicMock()
-    find_result.scalar_one_or_none.return_value = None
-
-    # Second execute: first-user check → no existing users (so new user becomes admin)
-    count_result = MagicMock()
-    count_result.first.return_value = None
-
-    session.execute.side_effect = [find_result, count_result]
-    session.add = MagicMock()
-    session.commit = AsyncMock()
-
-    created_user_holder = []
-
-    def capture_add(obj):
-        created_user_holder.append(obj)
-
-    session.add.side_effect = capture_add
-
-    async def fake_refresh(obj):
-        obj.id = uuid.uuid4()
-        obj.created_at = NOW
-
-    session.refresh = AsyncMock(side_effect=fake_refresh)
-    override_session(session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/auth/login", json={"username": "newuser"})
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["username"] == "newuser"
-    session.add.assert_called_once()
-    session.commit.assert_awaited_once()
+async def make_user(db_session, username="testuser", role="member", password_hash=None):
+    import bcrypt
+    ph = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode() if password_hash is None else password_hash
+    user = User(username=username, role=role, password_hash=ph)
+    db_session.add(user)
+    await db_session.flush()
+    await db_session.refresh(user)
+    return user
 
 
-@pytest.mark.asyncio
-async def test_login_returns_existing_user():
-    """POST /api/auth/login returns the existing user without creating a new one."""
-    existing = User(id=uuid.uuid4(), username="kmcbeth", role="member")
-    existing.created_at = NOW
-
-    session = AsyncMock()
-    find_result = MagicMock()
-    find_result.scalar_one_or_none.return_value = existing
-    session.execute.return_value = find_result
-    session.add = MagicMock()
-    override_session(session)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post("/api/auth/login", json={"username": "kmcbeth"})
-
-    assert response.status_code == 200
-    assert response.json()["username"] == "kmcbeth"
-    session.add.assert_not_called()
+def bearer(user: User, session_id=None) -> str:
+    sid = session_id or uuid.uuid4()
+    return create_access_token(user.id, sid, user.role)
 
 
 # ---------------------------------------------------------------------------
-# X-User header tests
+# Login
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.asyncio
-async def test_x_user_header_resolves_to_correct_user():
-    """GET /api/auth/me with a valid X-User header returns that user's profile."""
-    app.dependency_overrides[get_current_user] = lambda: member_user
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/auth/me", headers={"X-User": "kmcbeth"})
-
-    assert response.status_code == 200
-    assert response.json()["username"] == "kmcbeth"
+async def test_login_success_returns_access_token(app_client, db_session):
+    await make_user(db_session, "alice")
+    r = await app_client.post("/api/auth/login", json={"username": "alice", "password": "password123"})
+    assert r.status_code == 200
+    data = r.json()
+    assert "access_token" in data
+    assert data["user"]["username"] == "alice"
 
 
-@pytest.mark.asyncio
-async def test_missing_x_user_returns_422():
-    """GET /api/auth/me without X-User header returns 422 (FastAPI required-field error)."""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/auth/me")
-
-    assert response.status_code == 422
+async def test_login_wrong_password_returns_401(app_client, db_session):
+    await make_user(db_session, "bob")
+    r = await app_client.post("/api/auth/login", json={"username": "bob", "password": "wrong"})
+    assert r.status_code == 401
 
 
-@pytest.mark.asyncio
-async def test_x_user_not_in_db_returns_401():
-    """GET /api/auth/me returns 401 when X-User is present but user is not in the database."""
-    session = AsyncMock()
-    result = MagicMock()
-    result.scalar_one_or_none.return_value = None
-    session.execute.return_value = result
-    override_session(session)
+async def test_login_unknown_user_returns_401(app_client, db_session):
+    r = await app_client.post("/api/auth/login", json={"username": "ghost", "password": "x"})
+    assert r.status_code == 401
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/auth/me", headers={"X-User": "ghost"})
 
-    assert response.status_code == 401
+async def test_login_empty_password_rejected(app_client, db_session):
+    r = await app_client.post("/api/auth/login", json={"username": "alice", "password": ""})
+    assert r.status_code == 422
+
+
+async def test_login_null_hash_sets_password_on_first_login(app_client, db_session):
+    """Existing users with no password can log in once to set it."""
+    user = User(username="legacy", role="member", password_hash=None)
+    db_session.add(user)
+    await db_session.flush()
+
+    r = await app_client.post("/api/auth/login", json={"username": "legacy", "password": "newpass"})
+    assert r.status_code == 200
 
 
 # ---------------------------------------------------------------------------
-# require_admin tests
+# GET /api/auth/me
 # ---------------------------------------------------------------------------
 
-
-@pytest.mark.asyncio
-async def test_admin_check_passes_for_admin_role():
-    """An admin user can reach an admin-only endpoint; response is not 403."""
-    app.dependency_overrides[get_current_user] = lambda: admin_user
-    app.dependency_overrides[require_admin] = lambda: admin_user
-    override_session(make_empty_session())
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/users", headers={"X-User": "admin"})
-
-    assert response.status_code == 200
-    assert response.status_code != 403
+async def test_me_with_valid_token(app_client, db_session):
+    user = await make_user(db_session, "carol")
+    r = await app_client.get("/api/auth/me", headers={"Authorization": f"Bearer {bearer(user)}"})
+    assert r.status_code == 200
+    assert r.json()["username"] == "carol"
 
 
-@pytest.mark.asyncio
-async def test_admin_check_rejects_member_with_403():
-    """A member user is rejected with 403 on an admin-only endpoint."""
+async def test_me_missing_auth_header_returns_422(app_client):
+    r = await app_client.get("/api/auth/me")
+    assert r.status_code == 422
 
-    def raise_403():
-        raise HTTPException(status_code=403, detail="Admin required")
 
-    app.dependency_overrides[get_current_user] = lambda: member_user
-    app.dependency_overrides[require_admin] = raise_403
+async def test_me_invalid_token_returns_401(app_client):
+    r = await app_client.get("/api/auth/me", headers={"Authorization": "Bearer notavalidtoken"})
+    assert r.status_code == 401
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/api/users", headers={"X-User": "kmcbeth"})
 
-    assert response.status_code == 403
+async def test_me_expired_token_returns_401(app_client, db_session):
+    import app.token as token_module
+    original = token_module.settings.access_token_ttl
+    token_module.settings.access_token_ttl = -1
+    user = await make_user(db_session, "dave")
+    tok = bearer(user)
+    token_module.settings.access_token_ttl = original
+    r = await app_client.get("/api/auth/me", headers={"Authorization": f"Bearer {tok}"})
+    assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# require_admin
+# ---------------------------------------------------------------------------
+
+async def test_admin_endpoint_accessible_by_admin(app_client, db_session):
+    admin = await make_user(db_session, "admin2", role="admin")
+    r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(admin)}"})
+    assert r.status_code == 200
+
+
+async def test_admin_endpoint_rejected_for_member(app_client, db_session):
+    member = await make_user(db_session, "member2", role="member")
+    r = await app_client.get("/api/users", headers={"Authorization": f"Bearer {bearer(member)}"})
+    assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Refresh, logout, set-password
+# ---------------------------------------------------------------------------
+
+async def test_refresh_returns_new_access_token(app_client, db_session):
+    """POST /api/auth/refresh with a valid cookie issues a new access token."""
+    await make_user(db_session, "refresher")
+    # Login to get a refresh cookie
+    login_r = await app_client.post("/api/auth/login", json={"username": "refresher", "password": "password123"})
+    assert login_r.status_code == 200
+    # Extract the refresh token from Set-Cookie header directly (httpx won't send
+    # secure cookies back over http://test, so we pass it manually)
+    set_cookie = login_r.headers.get("set-cookie", "")
+    raw_token = None
+    for part in set_cookie.split(";"):
+        part = part.strip()
+        if part.startswith("refresh_token="):
+            raw_token = part[len("refresh_token="):]
+            break
+    assert raw_token is not None, "Login did not set refresh_token cookie"
+    r = await app_client.post("/api/auth/refresh", cookies={"refresh_token": raw_token})
+    assert r.status_code == 200
+    assert "access_token" in r.json()
+
+
+async def test_refresh_without_cookie_returns_401(app_client):
+    r = await app_client.post("/api/auth/refresh")
+    assert r.status_code == 401
+
+
+async def test_logout_revokes_session(app_client, db_session):
+    """After logout, the refresh token cookie should no longer work."""
+    await make_user(db_session, "logoutuser")
+    login_r = await app_client.post("/api/auth/login", json={"username": "logoutuser", "password": "password123"})
+    assert login_r.status_code == 200
+    access_token = login_r.json()["access_token"]
+    # Extract refresh token for later use
+    set_cookie = login_r.headers.get("set-cookie", "")
+    raw_token = None
+    for part in set_cookie.split(";"):
+        part = part.strip()
+        if part.startswith("refresh_token="):
+            raw_token = part[len("refresh_token="):]
+            break
+    assert raw_token is not None
+
+    logout_r = await app_client.post(
+        "/api/auth/logout",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert logout_r.status_code == 204
+
+    # Refresh should now fail because the session is revoked
+    r = await app_client.post("/api/auth/refresh", cookies={"refresh_token": raw_token})
+    assert r.status_code == 401
+
+
+async def test_set_password_updates_and_issues_new_token(app_client, db_session):
+    await make_user(db_session, "changepw")
+    login_r = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "password123"})
+    token = login_r.json()["access_token"]
+
+    r = await app_client.post(
+        "/api/auth/set-password",
+        json={"new_password": "newpassword456"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200
+    assert "access_token" in r.json()
+
+    # Old password should no longer work
+    r2 = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "password123"})
+    assert r2.status_code == 401
+
+    # New password should work
+    r3 = await app_client.post("/api/auth/login", json={"username": "changepw", "password": "newpassword456"})
+    assert r3.status_code == 200

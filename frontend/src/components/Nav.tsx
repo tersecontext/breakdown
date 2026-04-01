@@ -8,6 +8,7 @@ export default function Nav() {
   function logout() {
     localStorage.removeItem('username')
     localStorage.removeItem('role')
+    localStorage.removeItem('user_id')
     navigate('/login')
   }
 

@@ -1,17 +1,29 @@
 import json
 import logging
+import os
 from uuid import UUID
 
 from sqlalchemy import select
 
 from app.clients.anthropic import AnthropicClient
 from app.clients.tersecontext import TerseContextClient
+from app.config import settings
 from app.db import AsyncSessionLocal
 from app.engine.query_builder import build_query
 from app.models import Task, TaskLog
 from app.schemas import ResearchOutput
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences if present."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
 
 RESEARCH_SYSTEM_PROMPT = """You are analyzing a feature request against a codebase. You have been given the feature description, optional context from the requester, and relevant code context retrieved from the codebase.
 
@@ -62,9 +74,12 @@ async def research(
             session.add(TaskLog(task_id=task.id, event="research_started"))
             await session.commit()
 
+            session.add(TaskLog(task_id=task.id, event="querying_codebase"))
+            await session.commit()
             query_text = build_query(task)
             tc_context = await tc_client.query(query_text, repo=task.repo)
             task.tc_context = tc_context
+            session.add(TaskLog(task_id=task.id, event="analyzing"))
             await session.commit()
 
             optional_parts = []
@@ -84,13 +99,17 @@ async def research(
                 tc_context,
             ]))
 
+            repo_cwd = os.path.join(settings.repos_dir, task.repo)
+            repo_cwd = repo_cwd if os.path.isdir(repo_cwd) else None
+
             response = await llm_client.chat(
                 system=RESEARCH_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_message}],
+                cwd=repo_cwd,
             )
 
             try:
-                parsed = json.loads(response.content)
+                parsed = json.loads(_extract_json(response.content))
             except json.JSONDecodeError:
                 response = await llm_client.chat(
                     system=RESEARCH_SYSTEM_PROMPT,
@@ -99,8 +118,9 @@ async def research(
                         {"role": "assistant", "content": response.content},
                         {"role": "user", "content": "Your previous response was not valid JSON. Respond with only the JSON object, no other text."},
                     ],
+                    cwd=repo_cwd,
                 )
-                parsed = json.loads(response.content)
+                parsed = json.loads(_extract_json(response.content))
 
             ResearchOutput(**parsed)  # validate structure; raises ValidationError if invalid
 

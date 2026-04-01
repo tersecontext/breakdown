@@ -31,14 +31,17 @@ services:
       DATABASE_URL: postgresql+asyncpg://breakdown:${POSTGRES_PASSWORD:-localpassword}@postgres:5432/breakdown
       REDIS_URL: redis://redis:6379
       TERSECONTEXT_URL: ${TERSECONTEXT_URL:-http://host.docker.internal:8090}
-      SOURCE_DIRS: /repos
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      REPO_WATCHER_URL: ${REPO_WATCHER_URL:-http://repo-watcher:8080}
+      REPOS_DIR: /repos
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
       SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
       SLACK_CHANNEL: ${SLACK_CHANNEL:-tc-tasks}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-claude-sonnet-4-20250514}
+      SECRET_KEY: ${SECRET_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:5173"]}
     volumes:
-      - ${HOME}/workspaces:/repos:ro
+      - ${REPOS_DIR}:/repos:ro
+      - ${HOME}/.claude:/root/.claude:ro
     depends_on:
       postgres:
         condition: service_healthy

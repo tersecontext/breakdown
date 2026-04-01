@@ -14,17 +14,21 @@ def make_app_state():
     return state
 
 
-def make_mock_session(user=None, task=None):
-    """Session that returns user on first execute, task on second."""
+def make_mock_session(user=None, task=None, user_missing=False):
+    """Session that returns user on first execute, task on second.
+
+    Set user_missing=True to explicitly return None for the user lookup
+    (as opposed to user=None which means 'no user query at all').
+    """
     session = AsyncMock()
     session.add = MagicMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
 
     results = []
-    if user is not None:
+    if user is not None or user_missing:
         r = MagicMock()
-        r.scalar_one_or_none.return_value = user
+        r.scalar_one_or_none.return_value = user  # None when user_missing
         results.append(r)
     if task is not None:
         r = MagicMock()
@@ -89,7 +93,25 @@ async def test_repo_select_creates_user_if_not_exists():
     """select_repo action auto-creates user with role='member' when not found"""
     from app.clients.slack_bot import SlackBot
 
-    mock_session = make_mock_session(user=None)  # user not found
+    mock_session = make_mock_session(user_missing=True)  # user not found
+
+    # Make flush() assign a uuid id to any User objects that were added
+    added_objects = []
+    orig_add = mock_session.add
+
+    def tracking_add(obj):
+        added_objects.append(obj)
+        orig_add(obj)
+
+    mock_session.add = MagicMock(side_effect=tracking_add)
+
+    async def fake_flush():
+        for obj in added_objects:
+            if hasattr(obj, "id") and obj.id is None:
+                obj.id = uuid.uuid4()
+
+    mock_session.flush = AsyncMock(side_effect=fake_flush)
+
     mock_client = AsyncMock()
     mock_client.users_info.return_value = {
         "user": {"profile": {"display_name": "alice"}}

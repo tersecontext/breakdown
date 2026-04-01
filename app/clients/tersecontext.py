@@ -19,7 +19,7 @@ class TerseContextClient:
             try:
                 response = await self._client.post(
                     f"{self.base_url}/query",
-                    json={"query": query_text, "repo": repo},
+                    json={"question": query_text, "repo": repo},
                 )
                 response.raise_for_status()
                 return response.text
@@ -33,6 +33,29 @@ class TerseContextClient:
             return response.json()
         except Exception:
             return None
+
+    async def indexed_repos(self) -> list[str] | None:
+        try:
+            response = await self._client.get(f"{self.base_url}/repos")
+            return response.json()
+        except Exception:
+            return None
+
+    async def repo_status(self, name: str) -> dict | None:
+        try:
+            response = await self._client.get(f"{self.base_url}/repos/{name}/status")
+            response.raise_for_status()
+            return response.json()
+        except Exception:
+            return None
+
+    async def index_repo(self, repo_path: str, full_rescan: bool = False) -> dict:
+        response = await self._client.post(
+            f"{self.base_url}/index",
+            json={"repo_path": repo_path, "full_rescan": full_rescan},
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def close(self):
         await self._client.aclose()

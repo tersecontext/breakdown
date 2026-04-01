@@ -3,6 +3,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -11,72 +12,55 @@ os.environ.setdefault("SOURCE_DIRS", "/tmp")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key")
 os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test")
 os.environ.setdefault("SLACK_APP_TOKEN", "xapp-test")
-
-# Patch AsyncMock so that when no explicit side_effect/return_value is set,
-# the return value of awaitable methods is a MagicMock (not AsyncMock).
-# This ensures `result.scalar_one_or_none()` returns None by default,
-# matching SQLAlchemy session semantics in tests.
-_original_get_child_mock = AsyncMock._get_child_mock
-
-
-def _patched_get_child_mock(self, **kw):
-    if kw.get("_new_name") == "()":
-        rv = MagicMock(**kw)
-        rv.scalar_one_or_none.return_value = None
-        rv.scalars.return_value.all.return_value = []
-        return rv
-    return _original_get_child_mock(self, **kw)
-
-
-AsyncMock._get_child_mock = _patched_get_child_mock
+os.environ.setdefault("SECRET_KEY", "test-secret-key-32-chars-minimum!")
 
 TEST_DB_URL = os.environ["DATABASE_URL"]
 
-# Create tables once at module load time using the sync asyncio.run approach
-# so we don't fight pytest-asyncio event loop scoping.
-import asyncio as _asyncio
 
-
-def _ensure_tables():
-    from app.models import Base
-
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def db_engine():
     engine = create_async_engine(TEST_DB_URL, echo=False)
-
-    async def _run():
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        await engine.dispose()
-
-    _asyncio.run(_run())
-
-
-try:
-    _ensure_tables()
-except Exception:
-    pass  # If DB is unavailable, model tests will fail clearly on connect
-
-
-@pytest.fixture
-async def db_session():
-    """Yield an async session for one test; commit is the test's responsibility."""
-    engine = create_async_engine(TEST_DB_URL, echo=False)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        yield session
+    yield engine
     await engine.dispose()
 
 
-@pytest.fixture
-async def client():
-    """httpx AsyncClient pointed at the FastAPI app via ASGI transport."""
-    from app.main import app
+@pytest_asyncio.fixture
+async def db_conn(db_engine):
+    """One connection per test. Outer transaction is never committed — always rolled back."""
+    async with db_engine.connect() as conn:
+        await conn.begin()
+        yield conn
+        await conn.rollback()
 
+
+@pytest_asyncio.fixture
+async def db_session(db_conn):
+    """Session bound to the test connection. commit() is overridden to flush() so
+    route handlers can call commit() without destroying the outer transaction."""
+    factory = async_sessionmaker(bind=db_conn, expire_on_commit=False)
+    session = factory()
+    session.commit = session.flush
+    yield session
+    await session.close()
+
+
+@pytest_asyncio.fixture
+async def app_client(db_session):
+    """AsyncClient with get_session overridden to use the transactional test session."""
+    from app.main import app
+    from app.db import get_session
+
+    async def _override():
+        yield db_session
+
+    app.dependency_overrides[get_session] = _override
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+    app.dependency_overrides.pop(get_session, None)
 
 
-@pytest.fixture
-def mock_tc():
+@pytest_asyncio.fixture
+async def mock_tc():
     """TerseContextClient mock that returns a canned context string."""
     tc = AsyncMock()
     tc.query.return_value = "canned context: the parser lives in parser.py"
@@ -107,8 +91,8 @@ CANNED_RESEARCH = {
 }
 
 
-@pytest.fixture
-def mock_anthropic():
+@pytest_asyncio.fixture
+async def mock_anthropic():
     """AnthropicClient mock that returns canned research JSON."""
     llm = AsyncMock()
     response = MagicMock()
