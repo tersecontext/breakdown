@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import engine
+from app.routes.repos import router as repos_router
 
 
 @asynccontextmanager
@@ -22,6 +23,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(repos_router)
 
 
 @app.get("/health")
