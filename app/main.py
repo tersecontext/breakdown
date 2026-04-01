@@ -46,18 +46,21 @@ async def lifespan(app: FastAPI):
             from slack_sdk.web.async_client import AsyncWebClient
             web_client = AsyncWebClient(token=settings.slack_bot_token)
             channel_id = None
-            cursor = None
-            while channel_id is None:
-                resp = await web_client.conversations_list(
-                    exclude_archived=True, limit=200, cursor=cursor
-                )
-                for ch in resp["channels"]:
-                    if ch["name"] == settings.slack_channel:
-                        channel_id = ch["id"]
+            try:
+                cursor = None
+                while channel_id is None:
+                    resp = await web_client.conversations_list(
+                        exclude_archived=True, limit=200, cursor=cursor
+                    )
+                    for ch in resp["channels"]:
+                        if ch["name"] == settings.slack_channel:
+                            channel_id = ch["id"]
+                            break
+                    cursor = resp.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
                         break
-                cursor = resp.get("response_metadata", {}).get("next_cursor")
-                if not cursor:
-                    break
+            finally:
+                await web_client.close()
 
             if channel_id is None:
                 logger.warning(
