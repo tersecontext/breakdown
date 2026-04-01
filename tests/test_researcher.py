@@ -176,3 +176,45 @@ async def test_research_sets_failed_on_pydantic_validation_error():
 
     assert task.state == "failed"
     assert task.research is None
+
+
+@pytest.mark.asyncio
+async def test_research_calls_notify_on_success():
+    """research() calls notify(task) after setting state='researched'"""
+    task = make_mock_task()
+    mock_session = make_mock_session(task)
+
+    mock_tc = AsyncMock()
+    mock_tc.query.return_value = "context"
+
+    mock_llm_response = MagicMock()
+    mock_llm_response.content = json.dumps(VALID_RESEARCH)
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = mock_llm_response
+
+    notify = AsyncMock()
+
+    with patch("app.engine.researcher.AsyncSessionLocal", return_value=mock_session):
+        from app.engine.researcher import research
+        await research(task.id, mock_tc, mock_llm, notify=notify)
+
+    notify.assert_awaited_once_with(task)
+
+
+@pytest.mark.asyncio
+async def test_research_calls_notify_on_failure():
+    """research() calls notify(task) after setting state='failed'"""
+    from app.clients.tersecontext import TerseContextError
+    task = make_mock_task()
+    mock_session = make_mock_session(task)
+
+    mock_tc = AsyncMock()
+    mock_tc.query.side_effect = TerseContextError("TC down")
+
+    notify = AsyncMock()
+
+    with patch("app.engine.researcher.AsyncSessionLocal", return_value=mock_session):
+        from app.engine.researcher import research
+        await research(task.id, mock_tc, AsyncMock(), notify=notify)
+
+    notify.assert_awaited_once_with(task)
