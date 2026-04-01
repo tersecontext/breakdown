@@ -132,7 +132,7 @@ class SlackBot:
         repo = value["repo"]
         original_ts = value["ts"]
 
-        description = self._pending_messages.get(f"{channel_id}:{original_ts}", "")
+        description = self._pending_messages.pop(f"{channel_id}:{original_ts}", "")
         feature_name = description.split("\n")[0][:200] if description else "Untitled"
 
         username = await self._resolve_username(client, slack_user_id)
@@ -151,6 +151,7 @@ class SlackBot:
                 slack_thread_ts=original_ts,
             )
             session.add(task)
+            await session.flush()  # populates task.id from server_default
             session.add(TaskLog(task_id=task.id, event="task_created", actor_id=user.id))
             await session.commit()
 
