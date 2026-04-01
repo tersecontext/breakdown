@@ -186,3 +186,135 @@ async def test_approve_task_returns_500_when_redis_fails(app_client, db_session)
         )
 
     assert response.status_code == 500
+
+
+# --- resubmit ---
+
+@pytest.mark.asyncio
+async def test_resubmit_task_resets_state_and_reruns_research(app_client, db_session):
+    from app.main import app as fastapi_app
+    user = await make_user(db_session, "resubmit1")
+    task = await make_task(db_session, user, state="rejected")
+    fastapi_app.state.tc_client = AsyncMock()
+    fastapi_app.state.llm_client = AsyncMock()
+    fastapi_app.state.background_tasks = set()
+
+    with patch("app.routes.tasks.asyncio.create_task") as mock_create_task:
+        response = await app_client.post(
+            f"/api/tasks/{task.id}/resubmit",
+            json={"feature_name": "updated-name", "description": "updated desc"},
+            headers=auth_header(user),
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["state"] == "submitted"
+    assert data["feature_name"] == "updated-name"
+    assert data["description"] == "updated desc"
+    # unchanged fields keep original values
+    assert data["repo"] == "tersecontext"
+    mock_create_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_clears_research_and_error(app_client, db_session):
+    from app.main import app as fastapi_app
+    user = await make_user(db_session, "resubmit2")
+    task = await make_task(db_session, user, state="rejected", research={"summary": "old"})
+    task.error_message = "old error"
+    task.tc_context = "old context"
+    await db_session.flush()
+    fastapi_app.state.tc_client = AsyncMock()
+    fastapi_app.state.llm_client = AsyncMock()
+    fastapi_app.state.background_tasks = set()
+
+    with patch("app.routes.tasks.asyncio.create_task"):
+        response = await app_client.post(
+            f"/api/tasks/{task.id}/resubmit",
+            json={},
+            headers=auth_header(user),
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["research"] is None
+    assert data["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_returns_404_when_not_found(app_client, db_session):
+    user = await make_user(db_session, "resubmit3")
+    response = await app_client.post(
+        f"/api/tasks/{uuid.uuid4()}/resubmit",
+        json={},
+        headers=auth_header(user),
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_returns_409_when_not_rejected(app_client, db_session):
+    from app.main import app as fastapi_app
+    user = await make_user(db_session, "resubmit4")
+    task = await make_task(db_session, user, state="researched")
+    fastapi_app.state.background_tasks = set()
+    response = await app_client.post(
+        f"/api/tasks/{task.id}/resubmit",
+        json={},
+        headers=auth_header(user),
+    )
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_returns_403_for_non_submitter(app_client, db_session):
+    owner = await make_user(db_session, "resubmit5-owner")
+    other = await make_user(db_session, "resubmit5-other")
+    task = await make_task(db_session, owner, state="rejected")
+    response = await app_client.post(
+        f"/api/tasks/{task.id}/resubmit",
+        json={},
+        headers=auth_header(other),
+    )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_allowed_for_admin(app_client, db_session):
+    from app.main import app as fastapi_app
+    owner = await make_user(db_session, "resubmit6-owner")
+    admin = await make_user(db_session, "resubmit6-admin", role="admin")
+    task = await make_task(db_session, owner, state="rejected")
+    fastapi_app.state.tc_client = AsyncMock()
+    fastapi_app.state.llm_client = AsyncMock()
+    fastapi_app.state.background_tasks = set()
+
+    with patch("app.routes.tasks.asyncio.create_task"):
+        response = await app_client.post(
+            f"/api/tasks/{task.id}/resubmit",
+            json={},
+            headers=auth_header(admin),
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_resubmit_task_logs_resubmitted_event(app_client, db_session):
+    from app.main import app as fastapi_app
+    user = await make_user(db_session, "resubmit7")
+    task = await make_task(db_session, user, state="rejected")
+    fastapi_app.state.tc_client = AsyncMock()
+    fastapi_app.state.llm_client = AsyncMock()
+    fastapi_app.state.background_tasks = set()
+
+    with patch("app.routes.tasks.asyncio.create_task"):
+        response = await app_client.post(
+            f"/api/tasks/{task.id}/resubmit",
+            json={},
+            headers=auth_header(user),
+        )
+
+    assert response.status_code == 200
+    log_events = [log["event"] for log in response.json()["logs"]]
+    assert "task_resubmitted" in log_events
