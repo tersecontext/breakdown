@@ -12,7 +12,7 @@ async def test_run_migrations_success():
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.returncode = 0
 
-    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("app.main.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         await run_migrations()
 
     mock_exec.assert_called_once_with("alembic", "upgrade", "head")
