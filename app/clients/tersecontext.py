@@ -41,6 +41,14 @@ class TerseContextClient:
         except Exception:
             return None
 
+    async def repo_status(self, name: str) -> dict | None:
+        try:
+            response = await self._client.get(f"{self.base_url}/repos/{name}/status")
+            response.raise_for_status()
+            return response.json()
+        except Exception:
+            return None
+
     async def index_repo(self, repo_path: str, full_rescan: bool = False) -> dict:
         response = await self._client.post(
             f"{self.base_url}/index",

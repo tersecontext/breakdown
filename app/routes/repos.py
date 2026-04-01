@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 
@@ -23,22 +24,27 @@ def _find_repos() -> list[dict]:
 
 @router.get("")
 async def get_repos():
-    tc = TerseContextClient(settings.tersecontext_url)
+    watcher = TerseContextClient(settings.repo_watcher_url)
     try:
-        indexed = await tc.indexed_repos()
+        found = _find_repos()
+        statuses = await asyncio.gather(
+            *[watcher.repo_status(r["name"]) for r in found],
+            return_exceptions=True,
+        )
         repos = []
-        for repo in _find_repos():
-            tc_indexed = indexed is not None and repo["name"] in indexed
+        for repo, status in zip(found, statuses):
+            if isinstance(status, Exception) or status is None:
+                status = {}
             repos.append({
                 "name": repo["name"],
                 "path": repo["path"],
-                "tc_indexed": tc_indexed,
-                "tc_node_count": None,
-                "tc_last_indexed": None,
+                "tc_indexed": bool(status.get("indexed")),
+                "tc_node_count": status.get("node_count"),
+                "tc_last_indexed": status.get("last_indexed_at"),
             })
         return repos
     finally:
-        await tc.close()
+        await watcher.close()
 
 
 @router.post("/{name}/index", status_code=202)
