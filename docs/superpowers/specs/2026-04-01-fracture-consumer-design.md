@@ -29,11 +29,11 @@ Five files are affected:
 
 An async generator method on `RedisQueue` that:
 
-- Calls `xgroup_create` with `mkstream=True`; ignores `BUSYGROUP` errors (group already exists)
-- Calls `xreadgroup` with `group="breakdown"`, `block=1000` (1 s cap for responsive shutdown), `count=1`
+- Calls `xgroup_create("stream:fracture-results", "breakdown", id="0", mkstream=True)`; ignores `BUSYGROUP` errors (group already exists)
+- Calls `xreadgroup` with `group="breakdown"`, `consumername=socket.gethostname()`, `streams={"stream:fracture-results": ">"}`, `block=1000` (1 s cap for responsive shutdown), `count=1`
 - Yields `(msg_id, decoded_fields)` pairs
 - Decodes bytes keys/values to strings (mirrors fracture's `_decode_message`)
-- Caller is responsible for acking
+- Caller is responsible for acking via `self._redis.xack("stream:fracture-results", "breakdown", msg_id)`
 
 ### `app/engine/fracture_consumer.py` — `consume_fracture_results(app_state)`
 
@@ -44,17 +44,18 @@ A standalone async function (not a class) that:
   - Looks up the task by `task_id` in the DB via `AsyncSessionLocal`
   - If not found: logs a warning, acks, continues
   - If `status == "ok"`: sets `task.state = "decomposed"`, writes `TaskLog(event="decomposed")`, commits, acks
-  - If `status == "error"`: sets `task.state = "failed"`, sets `task.error_message = msg["error"]`, writes `TaskLog(event="fracture_failed", detail={"error": ...})`, commits, calls `post_error(task, app_state.slack_web_client)`, acks
-  - Acks in all cases (including task-not-found and DB errors) to avoid poison-pill loops
-- Wraps the entire loop in `try/except` to log unexpected crashes before re-raising
+  - If `status == "error"`: sets `task.state = "failed"`, sets `task.error_message = msg["error"]`, writes `TaskLog(event="fracture_failed", detail={"error": ...})`, commits; if `app_state.slack_web_client is not None` calls `post_error(task, app_state.slack_web_client)`; acks
+  - Each message's ack call is placed in a `finally` block so it executes even when DB commit or `post_error` raises — this guarantees no poison-pill messages regardless of which step fails
+- Wraps the entire loop body in `try/except` to log unexpected crashes before re-raising
 
 ### `app/main.py`
 
 In `lifespan`:
 
-1. After the Slack tokens are confirmed present, create `AsyncWebClient(token=settings.slack_bot_token)` and store it as `app.state.slack_web_client` (set to `None` if no token)
-2. Spawn `consume_fracture_results(app.state)` as an `asyncio.Task` stored in a dedicated variable (not in `background_tasks`, since it must be explicitly cancelled — not just GC'd)
-3. On shutdown: call `consumer_task.cancel()` and `await` it (suppress `CancelledError`)
+1. Create `AsyncWebClient(token=settings.slack_bot_token)` early in startup and store it as `app.state.slack_web_client`. Use this same client for the existing channel-lookup (replacing the ephemeral `web_client` that is currently created and immediately closed). Set `app.state.slack_web_client = None` if `settings.slack_bot_token` is absent.
+2. Spawn `consume_fracture_results(app.state)` as an `asyncio.Task` stored in a **dedicated variable** `consumer_task` (not in `background_tasks`, since it must be explicitly cancelled — not just GC'd).
+3. On shutdown: call `consumer_task.cancel()`, then `await consumer_task` with `CancelledError` suppressed. Since `xreadgroup` blocks for up to 1 s, cancellation completes within ~1 s. No timeout wrapper is needed.
+4. Close `app.state.slack_web_client` on shutdown (after cancelling the consumer).
 
 ### `frontend/src/components/StateBadge.tsx`
 
@@ -69,7 +70,7 @@ fracture writes → stream:fracture-results
                          ↓
               consume_fracture_results loop
                          ↓
-         xreadgroup(group="breakdown", block=1000ms)
+    xreadgroup(group="breakdown", consumer=hostname, block=1000ms)
                          ↓
               look up task by task_id in DB
                          ↓
@@ -79,7 +80,8 @@ fracture writes → stream:fracture-results
   TaskLog("decomposed")       task.error_message = msg["error"]
   commit → ack                TaskLog("fracture_failed")
                               commit
-                              post_error(task, slack_web_client)
+                              if slack_web_client:
+                                post_error(task, slack_web_client)
                               ack
 ```
 
@@ -94,7 +96,7 @@ No Slack notification is sent on success.
 | Task not found in DB | Log warning, ack, continue |
 | DB commit fails | Log exception, ack, continue |
 | `post_error` raises | Log exception, ack, continue |
-| Slack not configured (`slack_web_client is None`) | `post_error` returns early (guarded by `source_channel != "slack"` check) |
+| `slack_web_client is None` | Consumer guards with `if app_state.slack_web_client is not None` before calling `post_error`; no crash |
 | Consumer loop crashes unexpectedly | Top-level `try/except` logs and re-raises; lifespan shutdown still calls `cancel()` cleanly |
 
 ---
@@ -114,6 +116,7 @@ No Slack notification is sent on success.
 - `status == "error"`: task state set to `"failed"`, `error_message` set, `TaskLog("fracture_failed")` written, `post_error` called with task and slack client, message acked
 - Task not found: warning logged, message acked, no DB writes
 - DB commit failure: exception logged, message acked
+- `slack_web_client is None` with `source_channel == "slack"` error task: no crash, message acked, `post_error` not called
 
 ---
 
