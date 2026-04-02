@@ -1,6 +1,7 @@
 import json
 import pytest
 from unittest.mock import AsyncMock, patch
+import redis.asyncio as aioredis
 
 
 @pytest.mark.asyncio
@@ -65,7 +66,7 @@ async def test_read_fracture_results_creates_consumer_group():
 async def test_read_fracture_results_ignores_busygroup():
     """BUSYGROUP error from xgroup_create is silently ignored"""
     mock_redis = AsyncMock()
-    mock_redis.xgroup_create.side_effect = Exception("BUSYGROUP Consumer Group name already exists")
+    mock_redis.xgroup_create.side_effect = aioredis.ResponseError("BUSYGROUP Consumer Group name already exists")
     mock_redis.xreadgroup.return_value = []
 
     with patch("app.clients.redis.aioredis.from_url", return_value=mock_redis):

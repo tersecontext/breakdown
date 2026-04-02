@@ -28,7 +28,7 @@ class RedisQueue:
             await self._redis.xgroup_create(
                 _FRACTURE_STREAM, _FRACTURE_GROUP, id="0", mkstream=True
             )
-        except Exception as exc:
+        except aioredis.ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise
 
