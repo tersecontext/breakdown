@@ -3,7 +3,7 @@ import socket
 
 import redis.asyncio as aioredis
 
-COMPLEX_FIELDS = {"research", "additional_context", "optional_answers"}
+COMPLEX_FIELDS = {"research", "additional_context", "optional_answers", "file_paths"}
 
 _FRACTURE_STREAM = "stream:fracture-results"
 _FRACTURE_GROUP = "breakdown"
