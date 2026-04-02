@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
         await slack_bot.stop()
     await app.state.tc_client.close()
     await app.state.redis.close()
-    if app.state.slack_web_client is not None:
+    if app.state.slack_web_client is not None and app.state.slack_web_client.session is not None:
         await app.state.slack_web_client.session.close()
     await engine.dispose()
 
