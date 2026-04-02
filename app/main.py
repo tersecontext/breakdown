@@ -12,6 +12,7 @@ from app.clients.redis import RedisQueue
 from app.clients.tersecontext import TerseContextClient
 from app.config import settings
 from app.db import AsyncSessionLocal, engine
+from app.engine.fracture_consumer import consume_fracture_results
 from app.models import User
 from app.routes.repos import router as repos_router
 from app.routes.tasks import router as tasks_router
@@ -45,19 +46,23 @@ async def lifespan(app: FastAPI):
     app.state.redis = RedisQueue(settings.redis_url)
     app.state.background_tasks = set()  # holds references to prevent GC
 
+    # Persistent Slack web client — used by fracture consumer for error notifications.
+    # Also used below for channel-id lookup (replaces the previous ephemeral client).
+    app.state.slack_web_client = None
+    if settings.slack_bot_token:
+        from slack_sdk.web.async_client import AsyncWebClient
+        app.state.slack_web_client = AsyncWebClient(token=settings.slack_bot_token)
+
     slack_bot = None
     if settings.slack_bot_token and settings.slack_app_token:
         try:
             from app.clients.slack_bot import SlackBot
 
-            # Resolve channel name to ID
-            from slack_sdk.web.async_client import AsyncWebClient
-            web_client = AsyncWebClient(token=settings.slack_bot_token)
             channel_id = None
             try:
                 cursor = None
                 while channel_id is None:
-                    resp = await web_client.conversations_list(
+                    resp = await app.state.slack_web_client.conversations_list(
                         exclude_archived=True, limit=200, cursor=cursor
                     )
                     for ch in resp["channels"]:
@@ -67,8 +72,8 @@ async def lifespan(app: FastAPI):
                     cursor = resp.get("response_metadata", {}).get("next_cursor")
                     if not cursor:
                         break
-            finally:
-                await web_client.session.close()
+            except Exception:
+                logger.exception("Failed to look up Slack channel ID")
 
             if channel_id is None:
                 logger.warning(
@@ -81,12 +86,24 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to start Slack bot")
 
+    # Fracture results consumer — runs for the lifetime of the process.
+    consumer_task = asyncio.create_task(consume_fracture_results(app.state))
+
     yield
+
+    # ── Shutdown ────────────────────────────────────────────────────────────
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
 
     if slack_bot is not None:
         await slack_bot.stop()
     await app.state.tc_client.close()
     await app.state.redis.close()
+    if app.state.slack_web_client is not None:
+        await app.state.slack_web_client.session.close()
     await engine.dispose()
 
 
