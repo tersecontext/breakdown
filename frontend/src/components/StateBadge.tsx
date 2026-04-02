@@ -5,6 +5,7 @@ const STATE_COLORS: Record<string, string> = {
   approved: '#16a34a',
   rejected: '#dc2626',
   failed: '#dc2626',
+  decomposed: '#7c3aed',
 }
 
 export default function StateBadge({ state }: { state: string }) {
