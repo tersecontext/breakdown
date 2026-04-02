@@ -30,8 +30,11 @@ def make_task(task_id, source_channel="slack"):
 def make_session_mock(task):
     """Return a mock AsyncSessionLocal that yields a session whose execute()
     returns the given task (or None if task is None)."""
-    session = AsyncMock()
-    session.execute.return_value.scalar_one_or_none.return_value = task
+    session = MagicMock()
+    execute_result = MagicMock()
+    execute_result.scalar_one_or_none.return_value = task
+    session.execute = AsyncMock(return_value=execute_result)
+    session.commit = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=False)
     session_factory = MagicMock(return_value=session)

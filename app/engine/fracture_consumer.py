@@ -43,7 +43,7 @@ async def _handle_message(msg_id, fields: dict, app_state) -> None:
             result = await session.execute(
                 select(Task).where(Task.id == UUID(task_id_str))
             )
-            task = await result.scalar_one_or_none()
+            task = result.scalar_one_or_none()
 
             if task is None:
                 logger.warning(
